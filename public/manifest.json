@@ -1,0 +1,17 @@
+{
+  "short_name": "MLO",
+  "name": "MLO — Kenyan Meal & Budget Planner",
+  "description": "Eat Better. Plan Smarter. Live Within Your Means.",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "192x192 512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#FAF8F2",
+  "theme_color": "#14532D",
+  "display": "standalone",
+  "orientation": "portrait"
+}

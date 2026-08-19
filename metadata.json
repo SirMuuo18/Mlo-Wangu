@@ -1,0 +1,6 @@
+{
+  "name": "Mlo Wangu — Kenyan Meal & Budget Planner",
+  "description": "Eat Better. Plan Smarter. Live Within Your Means. Kenyan family meal-planning, healthy-eating, grocery-planning, hydration, and PIN-protected family budgeting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

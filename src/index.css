@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --mlo-primary: #14532d;
+    --mlo-primary-hover: #0f3e22;
+    --mlo-gold: #f4b942;
+    --mlo-gold-light: #fef3c7;
+    --mlo-gold-hover: #e5a72e;
+    --mlo-bg: #faf8f2;
+    --mlo-card: #ffffff;
+    --mlo-text: #17201a;
+    --mlo-text-muted: #66736a;
+    --mlo-positive: #2e7d32;
+    --mlo-warning: #d97706;
+    --mlo-danger: #c62828;
+    --mlo-navy: #172554;
+    --mlo-navy-light: #eff6ff;
+  }
+
+  body {
+    background-color: #faf8f2;
+    color: #17201a;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+  }
+}
+
+/* Tabular numerals for financial amounts */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f0ea;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4cfbe;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #b5ad98;
+}
+
+/* Mobile Safe Area Padding */
+.safe-bottom {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+
+.safe-top {
+  padding-top: max(1rem, env(safe-area-inset-top));
+}
