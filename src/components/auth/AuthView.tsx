@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { UtensilsCrossed, Mail, Lock, User, Eye, EyeOff, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Mail, Lock, User, Eye, EyeOff, AlertCircle, CheckCircle2 } from 'lucide-react';
 
 type AuthMode = 'login' | 'register';
 
@@ -57,8 +57,8 @@ export const AuthView: React.FC = () => {
     <div className="min-h-screen bg-[#0f1e2b] flex flex-col items-center justify-center p-4">
       {/* Brand header */}
       <div className="mb-8 text-center">
-        <div className="w-16 h-16 rounded-2xl bg-[#F4B942] flex items-center justify-center mx-auto mb-3 shadow-xl">
-          <UtensilsCrossed className="w-9 h-9 text-[#17201A]" />
+        <div className="w-20 h-20 rounded-2xl bg-white flex items-center justify-center mx-auto mb-3 shadow-xl overflow-hidden p-1.5">
+          <img src="/logo-icon-192.png" alt="Mlo Wangu" className="w-full h-full object-contain rounded-xl" />
         </div>
         <h1 className="text-3xl font-extrabold text-white tracking-tight">Mlo Wangu</h1>
         <p className="text-sm text-blue-200 mt-1">Your Kenyan Meal & Budget Planner</p>

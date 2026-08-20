@@ -25,9 +25,7 @@ export const Navbar: React.FC = () => {
       <div className="max-w-7xl mx-auto flex items-center justify-between">
         {/* Left: Brand Identity */}
         <div className="flex items-center gap-3 cursor-pointer" onClick={() => setActiveTab('home')}>
-          <div className="w-10 h-10 rounded-xl bg-[#14532D] flex items-center justify-center shadow-sm text-white font-black tracking-wider text-base border border-[#1E6B3C]">
-            <span className="text-[#F4B942]">M</span>W
-          </div>
+          <img src="/logo-icon-192.png" alt="Mlo Wangu" className="w-10 h-10 rounded-xl shadow-sm object-cover" />
           <div>
             <div className="flex items-center gap-2">
               <span className="font-extrabold text-xl tracking-tight text-[#14532D]">Mlo Wangu</span>

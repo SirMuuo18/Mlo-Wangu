@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  UtensilsCrossed, Home, Users, Heart, Wallet,
+  Home, Users, Heart, Wallet,
   ChevronRight, ChevronLeft, Check,
 } from 'lucide-react';
 
@@ -27,8 +27,8 @@ interface StepProps {
 
 const Step1Welcome: React.FC = () => (
   <div className="text-center py-4">
-    <div className="w-20 h-20 rounded-3xl bg-[#F4B942] flex items-center justify-center mx-auto mb-5 shadow-xl">
-      <UtensilsCrossed className="w-11 h-11 text-[#17201A]" />
+    <div className="w-24 h-24 rounded-3xl bg-white flex items-center justify-center mx-auto mb-5 shadow-xl overflow-hidden p-2">
+      <img src="/logo-icon-192.png" alt="Mlo Wangu" className="w-full h-full object-contain rounded-2xl" />
     </div>
     <h2 className="text-2xl font-extrabold text-white mb-3">Karibu Mlo Wangu!</h2>
     <p className="text-blue-200 text-sm leading-relaxed">

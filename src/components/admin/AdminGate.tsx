@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
 import { AdminView } from '../AdminView';
-import { ShieldAlert, ShieldCheck, Lock, Mail, Eye, EyeOff, AlertCircle, LogOut } from 'lucide-react';
+import { ShieldAlert, Lock, Mail, Eye, EyeOff, AlertCircle, LogOut } from 'lucide-react';
 
 // Entry point for /?admin=true. The query parameter only routes the browser
 // here — it grants nothing. Every render path below either shows a login
@@ -38,8 +38,8 @@ const AdminLoginForm: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#1a1208] flex flex-col items-center justify-center p-4">
       <div className="mb-8 text-center">
-        <div className="w-16 h-16 rounded-2xl bg-[#F4B942] flex items-center justify-center mx-auto mb-3 shadow-xl">
-          <ShieldCheck className="w-9 h-9 text-[#17201A]" />
+        <div className="w-20 h-20 rounded-2xl bg-white flex items-center justify-center mx-auto mb-3 shadow-xl overflow-hidden p-1.5">
+          <img src="/logo-icon-192.png" alt="Mlo Wangu" className="w-full h-full object-contain rounded-xl" />
         </div>
         <h1 className="text-2xl font-extrabold text-white tracking-tight">Mlo Wangu Admin</h1>
         <p className="text-sm text-amber-200/70 mt-1">Restricted administrator access</p>
@@ -170,7 +170,7 @@ export const AdminGate: React.FC = () => {
     <div className="min-h-screen bg-[#FAF8F2]">
       <header className="bg-[#17201A] px-4 sm:px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2 text-white">
-          <ShieldCheck className="w-5 h-5 text-[#F4B942]" />
+          <img src="/logo-icon-192.png" alt="Mlo Wangu" className="w-6 h-6 rounded-md" />
           <span className="font-extrabold text-sm">Mlo Wangu Admin</span>
         </div>
         <button
