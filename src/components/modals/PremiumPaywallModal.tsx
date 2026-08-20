@@ -3,16 +3,52 @@ import { useApp } from '../../context/AppContext';
 import { X, Check, Phone, ShieldCheck, Smartphone } from 'lucide-react';
 import { api } from '../../services/api';
 
+const POLL_INTERVAL_MS = 2500;
+const POLL_TIMEOUT_MS = 90_000;
+
 export const PremiumPaywallModal: React.FC = () => {
   const { isPremiumModalOpen, setIsPremiumModalOpen, user, refreshAll, triggerConfetti } = useApp();
 
   const [selectedPlan, setSelectedPlan] = useState<'weekly' | 'monthly'>('weekly');
   const [phone, setPhone] = useState('0712345678');
-  const [step, setStep] = useState<'plan' | 'stk_pending' | 'success'>('plan');
+  const [step, setStep] = useState<'plan' | 'stk_pending' | 'success' | 'failed'>('plan');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
 
   if (!isPremiumModalOpen) return null;
+
+  // Premium only ever activates on the server, from the real Daraja callback.
+  // This polls the server's own recorded payment status — it never assumes
+  // success on its own.
+  const pollPaymentStatus = (paymentId: string) => {
+    const startedAt = Date.now();
+    const poll = async () => {
+      try {
+        const { payment } = await api.getPaymentStatus(paymentId);
+        if (payment.status === 'success') {
+          setStep('success');
+          await refreshAll();
+          triggerConfetti();
+          return;
+        }
+        if (payment.status === 'failed' || payment.status === 'cancelled' || payment.status === 'expired') {
+          setStep('failed');
+          return;
+        }
+        if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+          setStep('failed');
+          return;
+        }
+      } catch {
+        if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+          setStep('failed');
+          return;
+        }
+      }
+      setTimeout(poll, POLL_INTERVAL_MS);
+    };
+    poll();
+  };
 
   const handleTriggerMpesa = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -21,24 +57,8 @@ export const PremiumPaywallModal: React.FC = () => {
 
     try {
       const res = await api.sendMpesaStkPush(phone, selectedPlan);
-      if (res.success) {
-        setStep('stk_pending');
-
-        // Automatically simulate customer PIN entry and callback verification
-        setTimeout(async () => {
-          try {
-            const verifyRes = await api.verifyMpesaPayment(res.checkoutRequestId, selectedPlan, phone);
-            if (verifyRes.verified) {
-              setStep('success');
-              await refreshAll();
-              triggerConfetti();
-            }
-          } catch {
-            setError('Payment verification timeout. Please try again.');
-            setStep('plan');
-          }
-        }, 3000);
-      }
+      setStep('stk_pending');
+      pollPaymentStatus(res.paymentId);
     } catch (err: any) {
       setError(err.message || 'Failed to initiate M-Pesa push');
     } finally {
@@ -139,7 +159,7 @@ export const PremiumPaywallModal: React.FC = () => {
                 className="w-full py-3 px-4 bg-[#25D366] hover:bg-[#20ba5a] text-white font-extrabold text-xs rounded-xl transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 <Smartphone className="w-4 h-4" />
-                {isLoading ? 'Initiating M-Pesa...' : `Pay KSh ${selectedPlan === 'weekly' ? 50 : 150} via M-Pesa STK Push`}
+                {isLoading ? 'Initiating M-Pesa...' : `PAY WITH M-PESA — KSh ${selectedPlan === 'weekly' ? 50 : 150}`}
               </button>
             </form>
           </div>
@@ -151,14 +171,14 @@ export const PremiumPaywallModal: React.FC = () => {
               <Smartphone className="w-8 h-8" />
             </div>
 
-            <h3 className="text-lg font-extrabold text-[#17201A]">M-Pesa STK Prompt Sent</h3>
+            <h3 className="text-lg font-extrabold text-[#17201A]">Check your phone and enter your M-Pesa PIN.</h3>
             <p className="text-xs text-[#66736A] max-w-xs mx-auto">
-              Please enter your M-Pesa PIN on your phone (<strong>{phone}</strong>) to authorize the payment of{' '}
+              We sent a prompt to <strong>{phone}</strong> to authorize the payment of{' '}
               <strong>KSh {selectedPlan === 'weekly' ? 50 : 150}</strong>.
             </p>
 
             <div className="p-3 bg-[#FAF8F2] rounded-xl border border-[#E8E5DD] text-[11px] text-[#66736A]">
-              Waiting for Safaricom M-Pesa confirmation...
+              Payment processing...
             </div>
           </div>
         )}
@@ -169,16 +189,41 @@ export const PremiumPaywallModal: React.FC = () => {
               <ShieldCheck className="w-8 h-8" />
             </div>
 
-            <h3 className="text-xl font-extrabold text-[#17201A]">Welcome to Mlo Wangu Premium!</h3>
+            <h3 className="text-xl font-extrabold text-[#17201A]">Payment successful 🎉</h3>
             <p className="text-xs text-[#66736A] max-w-xs mx-auto">
-              Your M-Pesa transaction was verified successfully. All premium AI and grocery features are now active.
+              Premium is now active. All premium AI and grocery features are unlocked.
             </p>
+            {user?.premiumExpiry && (
+              <p className="text-[11px] text-[#66736A]">
+                Valid until <strong>{new Date(user.premiumExpiry).toLocaleDateString('en-KE', { day: 'numeric', month: 'long', year: 'numeric' })}</strong>
+              </p>
+            )}
 
             <button
               onClick={() => setIsPremiumModalOpen(false)}
               className="w-full py-3 px-4 bg-[#14532D] text-white font-extrabold text-xs rounded-xl hover:bg-[#0f3e22]"
             >
               Start Exploring Premium
+            </button>
+          </div>
+        )}
+
+        {step === 'failed' && (
+          <div className="text-center py-6 space-y-4">
+            <div className="w-16 h-16 rounded-full bg-red-50 text-red-600 border border-red-200 flex items-center justify-center mx-auto">
+              <X className="w-8 h-8" />
+            </div>
+
+            <h3 className="text-xl font-extrabold text-[#17201A]">Payment was not completed.</h3>
+            <p className="text-xs text-[#66736A] max-w-xs mx-auto">
+              No charge was made and Premium was not activated. You can try again.
+            </p>
+
+            <button
+              onClick={() => setStep('plan')}
+              className="w-full py-3 px-4 bg-[#14532D] text-white font-extrabold text-xs rounded-xl hover:bg-[#0f3e22]"
+            >
+              Try Again
             </button>
           </div>
         )}

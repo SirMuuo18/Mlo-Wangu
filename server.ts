@@ -1,19 +1,148 @@
 import express, { Request, Response, NextFunction } from 'express';
+import 'express-async-errors'; // must load before routes are defined — forwards thrown/rejected errors in async handlers to the error middleware instead of crashing the process
 import path from 'path';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { db, generateShoppingItemsFromMealPlan, getMondayOfCurrentWeek, getTodayDate, getCurrentYearMonth } from './server/db';
+import { secureDb, paymentsDb } from './server/secure-db';
+import { getDarajaConfig, normalizeKenyanPhone, maskPhone, initiateStkPush, parseDarajaCallback, PREMIUM_PRICING, MEAL_PLAN_GENERATION_PRICE_KSH } from './server/mpesa';
 import { KENYAN_MEALS, KENYAN_FOOD_ITEMS } from './src/data/kenyanFoodData';
 import { ExpenseCategory, Meal } from './src/types';
+import { requireAuth, optionalAuth, setAuthCookies, clearAuthCookies } from './server/auth-middleware';
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
 
+// Never trust X-Forwarded-For unless this app is known to sit behind a specific,
+// trusted reverse proxy. Left disabled (Express default) so rate limiting keys
+// off the real socket address, not a client-spoofable header. If deployed behind
+// a trusted proxy (e.g. a platform load balancer), set this to the correct hop
+// count — never `true`, which trusts the whole chain.
+app.set('trust proxy', false);
+
+const isProdEnv = process.env.NODE_ENV === 'production';
+
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      // The production build emits no inline scripts, so scriptSrc stays strict
+      // there. In dev, Vite's middleware injects an inline module-preload/HMR
+      // bootstrap script into index.html — without 'unsafe-inline' here that
+      // script is blocked, @vitejs/plugin-react can't detect its preamble, and
+      // the whole React app fails to mount (blank page). This only relaxes the
+      // dev server, which never ships.
+      scriptSrc: isProdEnv ? ["'self'"] : ["'self'", "'unsafe-inline'"],
+      // React inline `style` props require 'unsafe-inline' here — tightening this
+      // further would break the existing UI. Scripts stay strict since the build
+      // emits no inline scripts.
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      // Vite's dev-mode HMR client connects back over a websocket on its own port.
+      connectSrc: isProdEnv
+        ? ["'self'", 'https://*.supabase.co', 'wss://*.supabase.co']
+        : ["'self'", 'https://*.supabase.co', 'wss://*.supabase.co', 'ws://localhost:*'],
+      // canvas-confetti (the Premium/meal-plan success animation) renders via a
+      // same-origin blob: Web Worker. Without worker-src, CSP falls back to
+      // scriptSrc, which doesn't allow blob:, so the worker is silently blocked.
+      workerSrc: ["'self'", 'blob:'],
+      frameAncestors: ["'none'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+      upgradeInsecureRequests: isProdEnv ? [] : null,
+    },
+  },
+  // HSTS only makes sense once the app is actually served over HTTPS in production.
+  hsts: process.env.NODE_ENV === 'production' ? { maxAge: 15552000, includeSubDomains: true } : false,
+  crossOriginEmbedderPolicy: false, // would block the Google Fonts stylesheet
+}));
+
 app.use(express.json());
+
+// ── Rate limiting ────────────────────────────────────────────────────────────
+// IP-based, layered on top of (not instead of) the per-account PIN lockout in
+// secureDb. All limiters return a generic 429 — never reveal account existence.
+// skipSuccessfulRequests means a genuine user who succeeds doesn't get punished
+// by their own earlier failed attempts once they authenticate correctly.
+const genericLimitHandler = (_req: Request, res: Response) => {
+  res.status(429).json({ error: 'Too many requests. Please try again later.' });
+};
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  handler: genericLimitHandler,
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  handler: genericLimitHandler,
+});
+
+const passwordResetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
+// Stricter: these gate access to private financial data, not just an account.
+const pinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  handler: genericLimitHandler,
+});
+
+// Real money moves through this one — tight IP window on top of the
+// application-level "one pending payment per user" guard below.
+const stkPushLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
+// Access-code guessing must be rate-limited like a credential — a code is a
+// bearer secret that grants a paid entitlement. Not skipSuccessfulRequests:
+// even a correct guess counts toward the window, since a code can be reused
+// up to max_uses and a compromised/leaked code shouldn't be guessable faster
+// just because one attempt already succeeded.
+const accessCodeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10, // same order of magnitude as loginLimiter above
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
 
 // Initialize Gemini Client Lazily
 let genAIClient: GoogleGenAI | null = null;
@@ -31,23 +160,32 @@ function getGeminiClient(): GoogleGenAI | null {
   return genAIClient;
 }
 
-// Global Auth Context Helper
-// In demo mode or standard usage, resolves to current authenticated user
-function getAuthenticatedUserId(req: Request): string {
-  const authHeader = req.headers['x-user-id'] as string;
-  if (authHeader) {
-    return authHeader;
+// Real per-request identity, set by the requireAuth middleware from the verified
+// HttpOnly session cookie (or the JSON-mode demo user — see auth-middleware.ts).
+// Never derived from a client-suppliable header or body field.
+function getAuthenticatedUserId(_req: Request, res: Response): string {
+  return res.locals.userId as string;
+}
+
+// Parse a named cookie from the request without cookie-parser.
+function getCookie(req: Request, name: string): string | undefined {
+  const header = req.headers.cookie || '';
+  for (const part of header.split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k.trim() === name) return decodeURIComponent(v.join('='));
   }
-  return 'usr_mwangi_demo'; // Default household owner
+  return undefined;
 }
 
 // STRICT FINANCIAL SECURITY MIDDLEWARE
-// Verifies that the client has provided a valid, unexpired financial session token
-function requireFinancialSession(req: Request, res: Response, next: NextFunction) {
-  const userId = getAuthenticatedUserId(req);
-  const finToken = (req.headers['x-financial-token'] as string) || (req.headers['authorization']?.replace('Bearer ', ''));
+// Reads the HttpOnly session cookie, resolves the server-side session,
+// and attaches the verified userId to res.locals.  The client can never
+// spoof this — the cookie is HttpOnly and the userId comes from the
+// server-side session store, NOT from any request header.
+async function requireFinancialSession(req: Request, res: Response, next: NextFunction) {
+  const token = getCookie(req, 'mlo_fin_session');
 
-  if (!finToken) {
+  if (!token) {
     return res.status(401).json({
       error: 'Budget is locked. Financial authorization required.',
       budgetLocked: true,
@@ -55,26 +193,196 @@ function requireFinancialSession(req: Request, res: Response, next: NextFunction
     });
   }
 
-  const isValid = db.verifyFinancialSession(userId, finToken);
-  if (!isValid) {
+  const session = await secureDb.getFinancialSession(token);
+  if (!session || session.expiresAt < Date.now()) {
+    if (session) await secureDb.invalidateFinancialSession(token);
+    res.clearCookie('mlo_fin_session', { httpOnly: true, sameSite: 'strict' });
     return res.status(403).json({
-      error: 'Financial session expired or invalid. Please re-enter your Budget PIN.',
+      error: 'Financial session expired. Please re-enter your Budget PIN.',
       budgetLocked: true,
       code: 'SESSION_EXPIRED',
     });
   }
 
+  // userId comes from the server-side session — never from the client
+  res.locals.userId = session.userId;
   next();
 }
+
+// ADMIN AUTHORIZATION — must run after requireAuth. Role comes from the
+// server-verified profile row, never from the client (no header, query
+// param, or body field is ever consulted). 401 if not authenticated at all,
+// 403 if authenticated but the account isn't an admin.
+async function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  const userId = res.locals.userId as string | undefined;
+  if (!userId) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  const user = await secureDb.getUser(userId);
+  if (!user || user.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden: admin access required' });
+  }
+  next();
+}
+
+// -------------------------------------------------------------
+// AUTH ROUTES (Supabase or JSON-DB dev mode)
+// -------------------------------------------------------------
+
+const USE_JSON_DB = process.env.USE_JSON_DB === 'true';
+
+function getSupabaseAdmin() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+  return createSupabaseClient(url, key, { auth: { persistSession: false } });
+}
+
+// Register
+app.post('/api/auth/register', registerLimiter, async (req: Request, res: Response) => {
+  if (USE_JSON_DB) {
+    return res.status(503).json({ error: 'Registration requires Supabase. Set USE_JSON_DB=false.' });
+  }
+  const { email, password, name } = req.body as { email?: string; password?: string; name?: string };
+  if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ error: 'Email and password are required.' });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  }
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(503).json({ error: 'Auth service not configured' });
+
+  const { data, error } = await supabase.auth.admin.createUser({
+    email: email.trim().toLowerCase(),
+    password,
+    user_metadata: { name: (name ?? '').trim() || email.split('@')[0] },
+    email_confirm: false,
+  });
+  if (error) return res.status(400).json({ error: error.message });
+  res.status(201).json({ message: 'Account created. Check your email to verify your address.' });
+});
+
+// Login
+app.post('/api/auth/login', loginLimiter, async (req: Request, res: Response) => {
+  if (USE_JSON_DB) {
+    // Dev mode: fake login always succeeds
+    const cookieOptions = '; HttpOnly; SameSite=Strict; Path=/';
+    res.setHeader('Set-Cookie', [
+      `mlo_auth_session=dev_token; Max-Age=3600${cookieOptions}`,
+      `mlo_auth_refresh=dev_refresh; Max-Age=${60 * 60 * 24 * 7}${cookieOptions}`,
+    ]);
+    return res.json({ message: 'Signed in (dev mode)', userId: 'usr_mwangi_demo' });
+  }
+
+  const { email, password } = req.body as { email?: string; password?: string };
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
+
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(503).json({ error: 'Auth service not configured' });
+
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: email.trim().toLowerCase(), password,
+  });
+  if (error || !data?.session) {
+    return res.status(401).json({ error: 'Invalid email or password.' });
+  }
+
+  setAuthCookies(res, data.session.access_token, data.session.refresh_token ?? '');
+  res.json({
+    message: 'Signed in successfully',
+    user: { id: data.user.id, email: data.user.email, name: data.user.user_metadata?.name },
+  });
+});
+
+// Logout — best-effort server-side Supabase session revocation, then clear cookies.
+// Revoking the underlying Supabase session (not just deleting the cookie) means a
+// previously captured access token stops working immediately via getUser(), not
+// just at its natural ~1h expiry. This calls Supabase's own revoke endpoint with
+// the token already in hand — no token is stored or logged anywhere by this call.
+app.post('/api/auth/logout', async (req: Request, res: Response) => {
+  if (!USE_JSON_DB) {
+    const accessToken = getCookie(req, 'mlo_auth_session');
+    if (accessToken) {
+      const admin = getSupabaseAdmin();
+      if (admin) {
+        try {
+          await admin.auth.admin.signOut(accessToken, 'global');
+        } catch {
+          // Best-effort: cookies are cleared regardless, so the browser is logged
+          // out either way even if the revocation call itself fails.
+        }
+      }
+    }
+  }
+  clearAuthCookies(res);
+  res.clearCookie('mlo_fin_session', { httpOnly: true, sameSite: 'strict' });
+  res.json({ message: 'Signed out' });
+});
+
+// Refresh session
+app.post('/api/auth/refresh', refreshLimiter, async (req: Request, res: Response) => {
+  if (USE_JSON_DB) return res.json({ message: 'ok (dev mode)' });
+
+  const refreshToken = getCookie(req, 'mlo_auth_refresh');
+  if (!refreshToken) return res.status(401).json({ error: 'No refresh token' });
+
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(503).json({ error: 'Auth service not configured' });
+
+  const { data, error } = await supabase.auth.refreshSession({ refresh_token: refreshToken });
+  if (error || !data?.session) {
+    clearAuthCookies(res);
+    return res.status(401).json({ error: 'Session expired. Please sign in again.' });
+  }
+  setAuthCookies(res, data.session.access_token, data.session.refresh_token ?? '');
+  res.json({ message: 'Session refreshed' });
+});
+
+// Request a password reset email. Always returns the same generic message
+// regardless of whether the email exists — never reveal account existence.
+app.post('/api/auth/request-password-reset', passwordResetLimiter, async (req: Request, res: Response) => {
+  const generic = { message: 'If an account exists for that email, a password reset link has been sent.' };
+  if (USE_JSON_DB) return res.json(generic);
+
+  const { email } = req.body as { email?: string };
+  if (!email || typeof email !== 'string') {
+    return res.status(400).json({ error: 'Email is required.' });
+  }
+
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return res.status(503).json({ error: 'Auth service not configured' });
+  }
+
+  const supabase = createSupabaseClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: false } });
+  try {
+    await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+      redirectTo: `${process.env.APP_URL || 'http://localhost:3000'}/reset-password`,
+    });
+  } catch {
+    // Swallow — always return the generic response so this endpoint can't be used
+    // to enumerate registered emails.
+  }
+  res.json(generic);
+});
+
+// Onboarding (non-financial preferences only — no Budget PIN required)
+app.post('/api/onboarding/complete', (req: Request, res: Response) => {
+  // Accept but do not fail on missing data — onboarding preferences are best-effort
+  // Financial setup (budget, PIN) is handled separately with Budget PIN
+  res.json({ ok: true });
+});
 
 // -------------------------------------------------------------
 // PUBLIC / SHAREABLE FAMILY ROUTES (No Budget Data Leaked)
 // -------------------------------------------------------------
 
 // 1. User / Auth
-app.get('/api/auth/me', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const user = db.getUser(userId);
+app.get('/api/auth/me', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const user = await secureDb.getUser(userId);
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
@@ -82,12 +390,12 @@ app.get('/api/auth/me', (req: Request, res: Response) => {
   const safeProfile = {
     id: user.id,
     name: user.name,
-    email: user.email,
+    email: (user as any).email ?? res.locals.userEmail ?? null,
     role: user.role,
     hasBudgetPin: user.hasBudgetPin,
     isPremium: user.isPremium,
     premiumExpiry: user.premiumExpiry,
-    createdAt: user.createdAt,
+    createdAt: (user as any).createdAt ?? null,
   };
   res.json({ user: safeProfile });
 });
@@ -98,10 +406,12 @@ app.get('/api/food/items', (req: Request, res: Response) => {
   res.json({ items });
 });
 
-// 3. Kenyan Meals Catalog
-app.get('/api/meals', (req: Request, res: Response) => {
+// 3. Kenyan Meals Catalog — system meals are public; custom meals are private to
+// their owner. optionalAuth resolves the caller's identity when present without
+// requiring login just to browse the public catalog.
+app.get('/api/meals', optionalAuth, (req: Request, res: Response) => {
   const { category, costLevel, search } = req.query;
-  let meals = db.getMeals();
+  let meals = db.getMeals(res.locals.userId);
 
   if (category && typeof category === 'string') {
     meals = meals.filter((m) => m.category === category);
@@ -126,17 +436,19 @@ app.get('/api/meals', (req: Request, res: Response) => {
   res.json({ meals });
 });
 
-app.get('/api/meals/:id', (req: Request, res: Response) => {
-  const meal = db.getMealById(req.params.id);
+app.get('/api/meals/:id', optionalAuth, (req: Request, res: Response) => {
+  const meal = db.getMealById(req.params.id, res.locals.userId);
   if (!meal) {
     return res.status(404).json({ error: 'Meal not found' });
   }
   res.json({ meal });
 });
 
-// Create Custom Meal
-app.post('/api/meals', (req: Request, res: Response) => {
+// Create Custom Meal — always owned by the authenticated caller; a client-supplied
+// ownerId is never accepted (the field isn't even read from req.body).
+app.post('/api/meals', requireAuth, (req: Request, res: Response) => {
   try {
+    const ownerId = getAuthenticatedUserId(req, res);
     const {
       name,
       swahiliName,
@@ -199,6 +511,7 @@ app.post('/api/meals', (req: Request, res: Response) => {
       servings: Math.max(1, Number(servings) || 4),
       kenyanCookingTips: kenyanCookingTips?.trim() || undefined,
       isCustom: true,
+      ownerId,
     };
 
     const savedMeal = db.addMeal(newMeal);
@@ -209,10 +522,11 @@ app.post('/api/meals', (req: Request, res: Response) => {
   }
 });
 
-// Delete Custom Meal
-app.delete('/api/meals/:id', (req: Request, res: Response) => {
+// Delete Custom Meal — only the owner may delete; system meals (no ownerId)
+// can never be deleted through this route regardless of caller.
+app.delete('/api/meals/:id', requireAuth, (req: Request, res: Response) => {
   const { id } = req.params;
-  const deleted = db.deleteMeal(id);
+  const deleted = db.deleteMeal(id, getAuthenticatedUserId(req, res));
   if (!deleted) {
     return res.status(404).json({ error: 'Meal not found or cannot be deleted' });
   }
@@ -220,13 +534,13 @@ app.delete('/api/meals/:id', (req: Request, res: Response) => {
 });
 
 // "What Can I Cook With KSh X?" Endpoint (Supports custom unconstrained budgets & unbounded portions)
-app.post('/api/meals/what-can-i-cook', (req: Request, res: Response) => {
+app.post('/api/meals/what-can-i-cook', optionalAuth, (req: Request, res: Response) => {
   const { budgetKsh, householdSize = 4, ingredients = [] } = req.body;
   const numBudget = Number(budgetKsh);
   const isNoLimit = numBudget === 0 || isNaN(numBudget) || numBudget < 0;
   const maxBudget = isNoLimit ? Infinity : numBudget;
   const portions = Math.max(1, Number(householdSize) || 4);
-  const allMeals = db.getMeals();
+  const allMeals = db.getMeals(res.locals.userId);
 
   // Score meals based on budget fit and available ingredients
   const results = allMeals
@@ -276,14 +590,14 @@ app.post('/api/meals/what-can-i-cook', (req: Request, res: Response) => {
 });
 
 // 4. Meal Planner
-app.get('/api/meal-plans/current', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.get('/api/meal-plans/current', requireAuth, (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
   const plan = db.getMealPlan(userId);
   res.json({ mealPlan: plan });
 });
 
-app.put('/api/meal-plans/current', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.put('/api/meal-plans/current', requireAuth, (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
   const updatedPlan = req.body.mealPlan;
   if (!updatedPlan) {
     return res.status(400).json({ error: 'Missing mealPlan body' });
@@ -293,27 +607,124 @@ app.put('/api/meal-plans/current', (req: Request, res: Response) => {
   res.json({ mealPlan: saved });
 });
 
-// Auto-generate a balanced, family-tailored weekly meal plan
-app.post('/api/meal-plans/generate', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const { preferences, maxCostPerMeal, budgetAware } = req.body;
-  const household = db.getHousehold(userId);
+// Auto-generate a balanced, family-tailored weekly meal plan.
+// Considers: household size, member allergies/dislikes, food budget,
+// nutrition variety, and avoids repeating the same meal twice in a week.
+//
+// GATED: a new generation requires an unconsumed meal-plan-generation
+// entitlement (bought via M-Pesa or redeemed via access code — see
+// /api/payments/mpesa/generation/stk-push and
+// /api/meal-plans/generation/redeem-access-code below). Viewing an already
+// generated plan (GET /api/meal-plans/current, above) is always free and
+// unaffected by this gate.
+app.post('/api/meal-plans/generate', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+
+  // Fail closed: any error while checking/claiming falls through to
+  // PAYMENT_REQUIRED rather than ever allowing an unauthorized generation.
+  let claimedEntitlementId: string | null = null;
+  try {
+    const entitlement = await paymentsDb.getUnusedEntitlement(userId);
+    if (!entitlement) {
+      return res.status(402).json({ error: 'A payment or access code is required to generate a new meal plan.', code: 'PAYMENT_REQUIRED', priceKsh: MEAL_PLAN_GENERATION_PRICE_KSH });
+    }
+    // Atomic claim: the WHERE clause requires used_at IS NULL, so if a
+    // double-click or a concurrent request already claimed this same
+    // entitlement, this returns null and we correctly refuse the second one
+    // rather than generating twice off one payment.
+    const claimed = await paymentsDb.claimEntitlement(entitlement.id, userId);
+    if (!claimed) {
+      return res.status(402).json({ error: 'A payment or access code is required to generate a new meal plan.', code: 'PAYMENT_REQUIRED', priceKsh: MEAL_PLAN_GENERATION_PRICE_KSH });
+    }
+    claimedEntitlementId = claimed.id;
+  } catch (err: any) {
+    console.error('[meal-plan-gate] entitlement check failed:', err?.message || err);
+    return res.status(402).json({ error: 'A payment or access code is required to generate a new meal plan.', code: 'PAYMENT_REQUIRED', priceKsh: MEAL_PLAN_GENERATION_PRICE_KSH });
+  }
+
+  try {
+    return await generateAndSaveMealPlan(userId, res);
+  } catch (err: any) {
+    // The user must not lose a paid entitlement to a server-side error —
+    // release the claim so they can retry without paying again. Consumption
+    // only becomes permanent once the plan is actually generated and saved.
+    await paymentsDb.releaseEntitlement(claimedEntitlementId).catch(() => {});
+    console.error('[meal-plan-gate] generation failed, entitlement released:', err?.message || err);
+    return res.status(500).json({ error: 'Failed to generate meal plan. Please try again.' });
+  }
+});
+
+async function generateAndSaveMealPlan(userId: string, res: Response) {
+  const household = await secureDb.getHousehold(userId);
+
+  const householdSize = household?.members.length || 4;
+
+  // Collect all allergies and dislikes across household members
+  const allergens = new Set<string>();
+  const dislikes = new Set<string>();
+  (household?.members || []).forEach((m) => {
+    (m.allergies || []).forEach((a) => allergens.add(a.toLowerCase()));
+    (m.dislikes || []).forEach((d) => dislikes.add(d.toLowerCase()));
+  });
+
+  // Get food budget from saved budget (if available) for cost-aware selection
+  const budget = await secureDb.getBudget(userId);
+  const foodCategory = budget?.categories.find((c) => c.category === 'Food');
+  const weeklyFoodBudget = foodCategory ? Math.round(foodCategory.plannedAmountKsh / 4) : Infinity;
+  const maxPerMeal = weeklyFoodBudget === Infinity ? Infinity : Math.round(weeklyFoodBudget / 21); // 3 meals × 7 days
+
+  const allMeals = db.getMeals(userId);
+
+  function scoreMeal(meal: typeof allMeals[0], usedIds: Set<string>): number {
+    if (usedIds.has(meal.id)) return -1000; // strong penalty for repeats
+
+    // Reject meals with allergens/dislikes in name or tags
+    const mealText = `${meal.name} ${(meal.tags || []).join(' ')} ${(meal.ingredients || []).map((i) => i.name).join(' ')}`.toLowerCase();
+    for (const a of allergens) { if (mealText.includes(a)) return -2000; }
+    for (const d of dislikes) { if (mealText.includes(d)) return -500; }
+
+    let score = 0;
+
+    // Budget fit: scaled cost for actual household size
+    const scaledCost = Math.round(meal.estimatedCostKsh * (householdSize / 4));
+    if (maxPerMeal < Infinity) {
+      if (scaledCost <= maxPerMeal) score += 30;
+      else score -= Math.round((scaledCost - maxPerMeal) / 20); // penalise over-budget
+    }
+
+    // Nutrition variety bonus
+    if (meal.nutrition?.proteinRich) score += 10;
+    if (meal.nutrition?.veggieRich) score += 8;
+    if (meal.nutrition?.carbRich) score += 5;
+
+    return score;
+  }
 
   const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as const;
-  const meals = db.getMeals();
+  const breakfasts = allMeals.filter((m) => m.category === 'breakfast');
+  const lunches    = allMeals.filter((m) => m.category === 'lunch');
+  const dinners    = allMeals.filter((m) => m.category === 'dinner');
+  const snacks     = allMeals.filter((m) => m.category === 'snack');
 
-  const breakfasts = meals.filter((m) => m.category === 'breakfast');
-  const lunches = meals.filter((m) => m.category === 'lunch');
-  const dinners = meals.filter((m) => m.category === 'dinner');
-  const snacks = meals.filter((m) => m.category === 'snack');
+  function pickBest(pool: typeof allMeals, used: Set<string>): typeof allMeals[0] {
+    const scored = pool.map((m) => ({ m, s: scoreMeal(m, used) })).sort((a, b) => b.s - a.s);
+    const pick = scored[0]?.m || pool[0];
+    used.add(pick.id);
+    return pick;
+  }
+
+  const usedB = new Set<string>();
+  const usedL = new Set<string>();
+  const usedD = new Set<string>();
+  const usedS = new Set<string>();
 
   const newDaysPlan: any = {};
-  days.forEach((day, index) => {
+  days.forEach((day) => {
     newDaysPlan[day] = {
-      breakfast: breakfasts[(index * 2) % breakfasts.length] || breakfasts[0],
-      lunch: lunches[(index * 3) % lunches.length] || lunches[0],
-      dinner: dinners[(index * 2 + 1) % dinners.length] || dinners[0],
-      snack: snacks[index % snacks.length] || snacks[0],
+      breakfast: pickBest(breakfasts, usedB),
+      lunch:     pickBest(lunches,    usedL),
+      dinner:    pickBest(dinners,    usedD),
+      snack:     pickBest(snacks,     usedS),
     };
   });
 
@@ -327,19 +738,19 @@ app.post('/api/meal-plans/generate', (req: Request, res: Response) => {
   };
 
   const saved = db.saveMealPlan(newPlan as any);
-  res.json({ mealPlan: saved });
-});
+  res.json({ mealPlan: saved, householdSize, weeklyFoodBudgetKsh: weeklyFoodBudget === Infinity ? null : weeklyFoodBudget });
+}
 
 // Swap a single meal with intelligent Kenyan recommendations
-app.post('/api/meal-plans/swap', (req: Request, res: Response) => {
+app.post('/api/meal-plans/swap', requireAuth, (req: Request, res: Response) => {
   const { day, mealType, currentMealId, reason } = req.body;
-  const userId = getAuthenticatedUserId(req);
+  const userId = getAuthenticatedUserId(req, res);
   const currentPlan = db.getMealPlan(userId);
   if (!currentPlan) {
     return res.status(404).json({ error: 'Meal plan not found' });
   }
 
-  const allMeals = db.getMeals();
+  const allMeals = db.getMeals(userId);
   const eligibleMeals = allMeals.filter((m) => m.category === mealType && m.id !== currentMealId);
 
   let selectedMeal = eligibleMeals[Math.floor(Math.random() * eligibleMeals.length)] || allMeals[0];
@@ -361,32 +772,32 @@ app.post('/api/meal-plans/swap', (req: Request, res: Response) => {
 });
 
 // 5. Household / Family Mode
-app.get('/api/household', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const household = db.getHousehold(userId);
+app.get('/api/household', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const household = await secureDb.getHousehold(userId);
   res.json({ household });
 });
 
-app.put('/api/household', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.put('/api/household', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
   const updatedHousehold = req.body.household;
   if (!updatedHousehold) {
     return res.status(400).json({ error: 'Missing household payload' });
   }
   updatedHousehold.ownerId = userId;
-  const saved = db.updateHousehold(updatedHousehold);
+  const saved = await secureDb.updateHousehold(updatedHousehold);
   res.json({ household: saved });
 });
 
 // 6. Shopping List
-app.get('/api/shopping/current', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.get('/api/shopping/current', requireAuth, (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
   const list = db.getShoppingList(userId);
   res.json({ shoppingList: list });
 });
 
-app.put('/api/shopping/current', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.put('/api/shopping/current', requireAuth, (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
   const updatedList = req.body.shoppingList;
   if (!updatedList) {
     return res.status(400).json({ error: 'Missing shoppingList payload' });
@@ -397,37 +808,40 @@ app.put('/api/shopping/current', (req: Request, res: Response) => {
 });
 
 // 7. Water & Hydration Tracker
-app.get('/api/water/today', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const log = db.getWaterLog(userId, getTodayDate());
-  const config = db.getWaterConfig(userId);
-  const history = db.getWaterHistory7Days(userId);
+app.get('/api/water/today', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const log = await secureDb.getWaterLog(userId, getTodayDate());
+  const config = await secureDb.getWaterConfig(userId);
+  const history = await secureDb.getWaterHistory7Days(userId);
   res.json({ waterLog: log, config, history });
 });
 
-app.post('/api/water/log', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.post('/api/water/log', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
   const amountMl = Number(req.body.amountMl) || 250;
-  const updatedLog = db.addWater(userId, amountMl);
+  const updatedLog = await secureDb.addWater(userId, amountMl);
   res.json({ waterLog: updatedLog });
 });
 
-app.put('/api/water/config', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.put('/api/water/config', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
   const newConfig = req.body.config;
-  const saved = db.updateWaterConfig(userId, newConfig);
+  const saved = await secureDb.updateWaterConfig(userId, newConfig);
   res.json({ config: saved });
 });
 
 // 8. Notifications
-app.get('/api/notifications', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.get('/api/notifications', requireAuth, (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
   const notifications = db.getNotifications(userId);
   res.json({ notifications });
 });
 
-app.post('/api/notifications/:id/read', (req: Request, res: Response) => {
-  db.markNotificationRead(req.params.id);
+app.post('/api/notifications/:id/read', requireAuth, (req: Request, res: Response) => {
+  const ok = db.markNotificationRead(req.params.id, getAuthenticatedUserId(req, res));
+  if (!ok) {
+    return res.status(404).json({ error: 'Notification not found or not owned by this user' });
+  }
   res.json({ success: true });
 });
 
@@ -435,85 +849,114 @@ app.post('/api/notifications/:id/read', (req: Request, res: Response) => {
 // FINANCIAL AUTHENTICATION & PIN SECURITY ROUTES
 // -------------------------------------------------------------
 
-// Setup / Change Budget PIN
-app.post('/api/financial-auth/setup-pin', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const { pin } = req.body;
+// Setup / Create Budget PIN (first time, or change after re-authentication)
+// Requires exactly 6 numeric digits — no default, no shortcut.
+app.post('/api/financial-auth/setup-pin', requireAuth, pinLimiter, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { pin, confirmPin } = req.body;
 
-  if (!pin || typeof pin !== 'string' || pin.length < 4 || pin.length > 6 || !/^\d+$/.test(pin)) {
-    return res.status(400).json({ error: 'PIN must be 4 to 6 numeric digits' });
+  if (!pin || typeof pin !== 'string' || !/^\d{6}$/.test(pin)) {
+    return res.status(400).json({ error: 'Budget PIN must be exactly 6 numeric digits.' });
+  }
+  if (confirmPin !== undefined && confirmPin !== pin) {
+    return res.status(400).json({ error: 'PINs do not match. Please try again.' });
   }
 
-  const success = db.setBudgetPin(userId, pin);
+  // Reject trivially sequential or repeated PINs
+  const trivial = ['123456', '654321', '111111', '222222', '333333', '444444', '555555', '666666', '777777', '888888', '999999', '000000', '112233', '998877'];
+  if (trivial.includes(pin)) {
+    return res.status(400).json({ error: 'That PIN is too easy to guess. Please choose a less predictable 6-digit PIN.' });
+  }
+
+  const success = await secureDb.setBudgetPin(userId, pin);
   if (!success) {
-    return res.status(500).json({ error: 'Failed to set PIN' });
+    return res.status(500).json({ error: 'Failed to save PIN. Please try again.' });
   }
 
-  // Create an initial financial session token right after setup
-  const sessionToken = db.createFinancialSession(userId, 15);
+  await secureDb.resetPinAttempts(userId);
+  const token = await secureDb.createFinancialSession(userId, 15);
+  const secure = process.env.NODE_ENV === 'production';
 
-  res.json({
-    success: true,
-    message: 'Budget PIN set securely.',
-    financialToken: sessionToken,
-    expiresInMinutes: 15,
+  res.cookie('mlo_fin_session', token, {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure,
+    maxAge: 15 * 60 * 1000,
   });
+
+  res.json({ success: true, message: 'Budget PIN created. Budget is now unlocked.' });
 });
 
-// Unlock Budget with PIN -> Returns short-lived Financial Session Token
-app.post('/api/financial-auth/unlock', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const { pin, timeoutMinutes = 15 } = req.body;
+// Unlock Budget — verify 6-digit PIN, enforce lockout, set HttpOnly cookie
+app.post('/api/financial-auth/unlock', requireAuth, pinLimiter, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { pin } = req.body;
 
   if (!pin || typeof pin !== 'string') {
-    return res.status(400).json({ error: 'PIN is required' });
+    return res.status(400).json({ error: 'PIN is required.' });
   }
 
-  const isValid = db.verifyBudgetPin(userId, pin);
-  if (!isValid) {
-    return res.status(401).json({
-      error: 'Incorrect Budget PIN. Access denied.',
+  // Always return the same opaque error — do not reveal whether PIN exists
+  const lockout = await secureDb.checkPinLockout(userId);
+  if (lockout.locked) {
+    const minutes = Math.ceil(lockout.secondsRemaining / 60);
+    return res.status(429).json({
+      error: `Too many incorrect attempts. Please wait ${minutes} minute${minutes !== 1 ? 's' : ''} before trying again.`,
+      lockedUntilSeconds: lockout.secondsRemaining,
       unlocked: false,
     });
   }
 
-  const sessionToken = db.createFinancialSession(userId, timeoutMinutes);
-
-  res.json({
-    unlocked: true,
-    financialToken: sessionToken,
-    expiresInMinutes: timeoutMinutes,
-    message: 'Budget unlocked successfully.',
-  });
-});
-
-// Lock Budget -> Invalidates all current financial session tokens immediately
-app.post('/api/financial-auth/lock', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const finToken = (req.headers['x-financial-token'] as string) || (req.headers['authorization']?.replace('Bearer ', ''));
-
-  if (finToken) {
-    db.invalidateFinancialSession(finToken);
-  } else {
-    db.invalidateAllFinancialSessionsForUser(userId);
+  const isValid = await secureDb.verifyBudgetPin(userId, pin);
+  if (!isValid) {
+    await secureDb.recordPinFailure(userId);
+    const updatedLockout = await secureDb.checkPinLockout(userId);
+    if (updatedLockout.locked) {
+      const minutes = Math.ceil(updatedLockout.secondsRemaining / 60);
+      return res.status(429).json({
+        error: `Too many incorrect attempts. Budget locked for ${minutes} minute${minutes !== 1 ? 's' : ''}.`,
+        lockedUntilSeconds: updatedLockout.secondsRemaining,
+        unlocked: false,
+      });
+    }
+    return res.status(401).json({ error: 'Incorrect PIN. Access denied.', unlocked: false });
   }
 
-  res.json({
-    locked: true,
-    message: 'Budget is now locked. Financial session terminated.',
+  await secureDb.resetPinAttempts(userId);
+  const token = await secureDb.createFinancialSession(userId, 15);
+  const secure = process.env.NODE_ENV === 'production';
+
+  res.cookie('mlo_fin_session', token, {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure,
+    maxAge: 15 * 60 * 1000,
   });
+
+  res.json({ unlocked: true, message: 'Budget unlocked.' });
 });
 
-// Verify if active financial token is still valid
-app.get('/api/financial-auth/status', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const finToken = (req.headers['x-financial-token'] as string) || (req.headers['authorization']?.replace('Bearer ', ''));
-  const isValid = db.verifyFinancialSession(userId, finToken);
+// Lock Budget — invalidate server-side session and clear cookie immediately
+app.post('/api/financial-auth/lock', requireAuth, async (req: Request, res: Response) => {
+  const token = getCookie(req, 'mlo_fin_session');
+  if (token) {
+    await secureDb.invalidateFinancialSession(token);
+  } else {
+    // Belt-and-suspenders: also invalidate all sessions for the default user
+    await secureDb.invalidateAllFinancialSessionsForUser(getAuthenticatedUserId(req, res));
+  }
+  res.clearCookie('mlo_fin_session', { httpOnly: true, sameSite: 'strict' });
+  res.json({ locked: true, message: 'Budget locked. Session terminated.' });
+});
 
-  res.json({
-    isUnlocked: isValid,
-    userId,
-  });
+// Check whether the current HttpOnly cookie session is still valid
+app.get('/api/financial-auth/status', async (req: Request, res: Response) => {
+  const token = getCookie(req, 'mlo_fin_session');
+  if (!token) return res.json({ isUnlocked: false });
+  const session = await secureDb.getFinancialSession(token);
+  const isUnlocked = !!(session && session.expiresAt > Date.now());
+  if (!isUnlocked && session) await secureDb.invalidateFinancialSession(token);
+  res.json({ isUnlocked });
 });
 
 // -------------------------------------------------------------
@@ -521,37 +964,56 @@ app.get('/api/financial-auth/status', (req: Request, res: Response) => {
 // -------------------------------------------------------------
 
 // Get Full Budget & Allocation
-app.get('/api/financial/budget', requireFinancialSession, (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.get('/api/financial/budget', requireFinancialSession, async (req: Request, res: Response) => {
+  const userId: string = res.locals.userId;
   const month = (req.query.month as string) || getCurrentYearMonth();
-  const budget = db.getBudget(userId, month);
+  const budget = await secureDb.getBudget(userId, month);
   res.json({ budget });
 });
 
-// Update Budget & Recommended Plan
-app.put('/api/financial/budget', requireFinancialSession, (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+// Update Budget — validates total vs income, returns allocation feedback
+app.put('/api/financial/budget', requireFinancialSession, async (req: Request, res: Response) => {
+  const userId: string = res.locals.userId;
   const updatedBudget = req.body.budget;
   if (!updatedBudget) {
     return res.status(400).json({ error: 'Missing budget payload' });
   }
   updatedBudget.userId = userId;
   updatedBudget.updatedAt = new Date().toISOString();
-  const saved = db.saveBudget(updatedBudget);
-  res.json({ budget: saved });
+
+  const income = Number(updatedBudget.monthlyIncomeKsh) || 0;
+  const totalAllocated = (updatedBudget.categories || []).reduce(
+    (sum: number, c: any) => sum + (Number(c.plannedAmountKsh) || 0), 0
+  );
+  const difference = income - totalAllocated;
+
+  const saved = await secureDb.saveBudget(updatedBudget);
+  res.json({
+    budget: saved,
+    validation: {
+      totalAllocatedKsh: totalAllocated,
+      differenceKsh: difference,
+      status: difference < 0 ? 'over' : difference === 0 ? 'balanced' : 'under',
+      message: difference < 0
+        ? `Your planned expenses are KSh ${Math.abs(difference).toLocaleString()} above your income.`
+        : difference === 0
+        ? 'Budget perfectly balanced.'
+        : `You have KSh ${difference.toLocaleString()} unallocated.`,
+    },
+  });
 });
 
 // Get Expenses
-app.get('/api/financial/expenses', requireFinancialSession, (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.get('/api/financial/expenses', requireFinancialSession, async (req: Request, res: Response) => {
+  const userId: string = res.locals.userId;
   const month = (req.query.month as string) || getCurrentYearMonth();
-  const expenses = db.getExpenses(userId, month);
+  const expenses = await secureDb.getExpenses(userId, month);
   res.json({ expenses });
 });
 
 // Log New Expense
-app.post('/api/financial/expenses', requireFinancialSession, (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.post('/api/financial/expenses', requireFinancialSession, async (req: Request, res: Response) => {
+  const userId: string = res.locals.userId;
   const { amountKsh, category, description, date } = req.body;
 
   if (!amountKsh || isNaN(Number(amountKsh)) || Number(amountKsh) <= 0) {
@@ -561,7 +1023,7 @@ app.post('/api/financial/expenses', requireFinancialSession, (req: Request, res:
     return res.status(400).json({ error: 'Expense category is required' });
   }
 
-  const newExpense = db.addExpense({
+  const newExpense = await secureDb.addExpense({
     id: `exp_${Date.now()}`,
     userId,
     amountKsh: Math.round(Number(amountKsh)),
@@ -575,9 +1037,9 @@ app.post('/api/financial/expenses', requireFinancialSession, (req: Request, res:
 });
 
 // Delete Expense
-app.delete('/api/financial/expenses/:id', requireFinancialSession, (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const success = db.deleteExpense(userId, req.params.id);
+app.delete('/api/financial/expenses/:id', requireFinancialSession, async (req: Request, res: Response) => {
+  const userId: string = res.locals.userId;
+  const success = await secureDb.deleteExpense(userId, req.params.id);
   if (!success) {
     return res.status(404).json({ error: 'Expense not found or unauthorized' });
   }
@@ -585,21 +1047,21 @@ app.delete('/api/financial/expenses/:id', requireFinancialSession, (req: Request
 });
 
 // Overspending Engine & Smart Analysis
-app.get('/api/financial/overspending-analysis', requireFinancialSession, (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.get('/api/financial/overspending-analysis', requireFinancialSession, async (req: Request, res: Response) => {
+  const userId: string = res.locals.userId;
   const month = (req.query.month as string) || getCurrentYearMonth();
-  const analysis = db.calculateOverspendingAnalysis(userId, month);
+  const analysis = await secureDb.calculateOverspendingAnalysis(userId, month);
   res.json({ analysis });
 });
 
 // Full Financial Dashboard Summary
-app.get('/api/financial/summary', requireFinancialSession, (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
+app.get('/api/financial/summary', requireFinancialSession, async (req: Request, res: Response) => {
+  const userId: string = res.locals.userId;
   const month = (req.query.month as string) || getCurrentYearMonth();
 
-  const budget = db.getBudget(userId, month);
-  const expenses = db.getExpenses(userId, month);
-  const analysis = db.calculateOverspendingAnalysis(userId, month);
+  const budget = await secureDb.getBudget(userId, month);
+  const expenses = await secureDb.getExpenses(userId, month);
+  const analysis = await secureDb.calculateOverspendingAnalysis(userId, month);
 
   const totalIncome = budget?.monthlyIncomeKsh || 0;
   const totalSpent = expenses.reduce((acc, curr) => acc + curr.amountKsh, 0);
@@ -640,20 +1102,21 @@ app.get('/api/financial/summary', requireFinancialSession, (req: Request, res: R
 // Context-Aware, Privacy-Hardened
 // -------------------------------------------------------------
 
-app.post('/api/ai/chat', async (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const { message, conversationHistory = [] } = req.body;
-  const finToken = (req.headers['x-financial-token'] as string) || (req.headers['authorization']?.replace('Bearer ', ''));
+app.post('/api/ai/chat', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { message } = req.body;
 
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'Message is required' });
   }
 
-  // Check if financial session is unlocked
-  const isFinancialUnlocked = db.verifyFinancialSession(userId, finToken);
+  // Financial context is ONLY injected when the HttpOnly session cookie is present and valid
+  const finToken = getCookie(req, 'mlo_fin_session');
+  const finSession = finToken ? await secureDb.getFinancialSession(finToken) : undefined;
+  const isFinancialUnlocked = !!(finSession && finSession.userId === userId && finSession.expiresAt > Date.now());
 
-  const user = db.getUser(userId);
-  const household = db.getHousehold(userId);
+  const user = await secureDb.getUser(userId);
+  const household = await secureDb.getHousehold(userId);
   const currentPlan = db.getMealPlan(userId);
 
   // System Context Construction
@@ -673,8 +1136,8 @@ User Context:
 `;
 
   if (isFinancialUnlocked) {
-    const budget = db.getBudget(userId);
-    const analysis = db.calculateOverspendingAnalysis(userId);
+    const budget = await secureDb.getBudget(userId);
+    const analysis = await secureDb.calculateOverspendingAnalysis(userId);
     systemPrompt += `
 [FINANCIAL CONTEXT AUTHORIZED - Budget Unlocked by User PIN]:
 - Monthly Income: KSh ${(budget?.monthlyIncomeKsh || 0).toLocaleString()}
@@ -730,6 +1193,12 @@ You MAY give specific financial advice, budget recovery meal plans, and cost opt
 function generateLocalKenyanAIResponse(query: string, isUnlocked: boolean, household: any, mealPlan: any): string {
   const q = query.toLowerCase();
   const householdCount = household?.members?.length || 4;
+
+  // If budget is LOCKED and user asks about private financial data, tell them to unlock
+  const isFinancialQuery = q.includes('income') || q.includes('salary') || q.includes('rent') || q.includes('expense') || q.includes('balance') || q.includes('savings') || q.includes('debt') || q.includes('budget history') || q.includes('how much do i earn') || q.includes('my money');
+  if (!isUnlocked && isFinancialQuery) {
+    return `Your **Private Budget is currently protected** with your 6-digit Budget PIN. 🔒\n\nI cannot access your salary, rent, expenses, or savings while the Budget is locked — this is by design to protect your financial privacy.\n\nTo get personalized financial advice and budget-aware meal plans:\n1. Go to the **Budget** tab.\n2. Enter your **Budget PIN** to unlock.\n3. Come back here and I can give you specific money-smart meal recommendations!\n\nIn the meantime, I can still help with general Kenyan recipe ideas, ingredient swaps, and hypothetical budget scenarios. Just ask!`;
+  }
 
   if (q.includes('protein') || q.includes('muscle') || q.includes('bodybuilding') || (q.includes('high') && q.includes('protein'))) {
     return `### High-Protein Kenyan Foods on a Strict Budget 🌾
@@ -815,78 +1284,297 @@ What would you like to prepare or optimize today?`;
 // PREMIUM & M-PESA PAYMENT SYSTEM (Server-Side Verified)
 // -------------------------------------------------------------
 
-app.post('/api/payments/mpesa/stk-push', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const { phoneNumber, planType = 'weekly' } = req.body;
+// Initiate a real Daraja STK Push. The server — never the client — decides
+// the price and duration for the requested plan. Premium is NOT activated
+// here; it only activates when the real Safaricom callback confirms success
+// (see /api/payments/mpesa/callback below).
+app.post('/api/payments/mpesa/stk-push', requireAuth, stkPushLimiter, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { planType } = req.body;
 
-  if (!phoneNumber || !/^(\+?254|0)[17]\d{8}$/.test(phoneNumber.replace(/\s+/g, ''))) {
+  if (planType !== 'weekly' && planType !== 'monthly') {
+    return res.status(400).json({ error: 'planType must be "weekly" or "monthly".' });
+  }
+
+  const phone = normalizeKenyanPhone(req.body.phoneNumber);
+  if (!phone) {
     return res.status(400).json({ error: 'Please provide a valid Kenyan Safaricom M-Pesa phone number (e.g. 0712345678 or 254712345678).' });
   }
 
-  const priceKsh = planType === 'monthly' ? 150 : 50;
-  const checkoutRequestId = `ws_CO_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+  // Prevent a duplicate STK push while one is already in flight for this user.
+  const recentPending = await paymentsDb.getRecentPendingPayment(userId, 2 * 60 * 1000);
+  if (recentPending) {
+    return res.status(429).json({ error: 'A payment is already in progress. Please check your phone, or wait a moment before trying again.', paymentId: recentPending.id });
+  }
 
-  // Simulated server-side STK push dispatch
+  // Server determines the amount and duration — a client-supplied amount is
+  // never read from the request body at all. The pending record is created
+  // with this server-determined amount before Daraja is even contacted, so
+  // the amount is never influenced by anything the client sent.
+  const { priceKsh } = PREMIUM_PRICING[planType as 'weekly' | 'monthly'];
+  const payment = await paymentsDb.createPendingPayment(userId, { amountKsh: priceKsh, phoneNumber: phone, planType });
+
+  const config = getDarajaConfig();
+  if (!config) {
+    await paymentsDb.transitionPayment(payment.id, 'pending', { status: 'failed', resultDesc: 'M-Pesa not configured' });
+    return res.status(503).json({ error: 'M-Pesa payments are not configured. Please try again later.', paymentId: payment.id });
+  }
+
+  try {
+    const stk = await initiateStkPush(config, {
+      phone,
+      amountKsh: priceKsh,
+      accountReference: `MLO${payment.id.replace(/-/g, '').slice(0, 10).toUpperCase()}`,
+      transactionDesc: `MLO Premium ${planType}`,
+    });
+    await paymentsDb.setPaymentCheckoutIds(payment.id, { checkoutRequestId: stk.checkoutRequestId, merchantRequestId: stk.merchantRequestId });
+
+    res.json({
+      paymentId: payment.id,
+      status: 'pending',
+      amountKsh: priceKsh,
+      planType,
+      message: 'Check your phone and enter your M-Pesa PIN.',
+    });
+  } catch (err: any) {
+    console.error(`[mpesa] STK push failed for payment ${payment.id} (phone ${maskPhone(phone)}):`, err?.message || err);
+    await paymentsDb.transitionPayment(payment.id, 'pending', { status: 'failed', resultDesc: 'STK push initiation failed' });
+    res.status(502).json({ error: 'Could not reach M-Pesa. Please try again.' });
+  }
+});
+
+// -------------------------------------------------------------
+// "GENERATE NEW PLAN" PAYMENT/ACCESS-CODE GATE
+// -------------------------------------------------------------
+// Separate from the Premium subscription above: reuses the same Daraja
+// client and payments table, but a successful payment here creates a
+// meal-plan-generation entitlement (see paymentsDb.createEntitlementFromPayment
+// in the callback handler below) rather than a subscription. It never sets
+// profiles.is_premium.
+
+// Read-only check the frontend calls before deciding whether to generate
+// immediately or show the payment/access-code modal. This is a UX
+// convenience only — POST /api/meal-plans/generate re-verifies and
+// atomically claims the entitlement itself; nothing here is trusted as
+// authorization on its own.
+app.get('/api/meal-plans/generation/entitlement-status', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  try {
+    const entitlement = await paymentsDb.getUnusedEntitlement(userId);
+    res.json({ hasEntitlement: !!entitlement, priceKsh: MEAL_PLAN_GENERATION_PRICE_KSH });
+  } catch (err: any) {
+    console.error('[meal-plan-gate] entitlement-status error:', err?.message || err);
+    res.json({ hasEntitlement: false, priceKsh: MEAL_PLAN_GENERATION_PRICE_KSH }); // fail closed
+  }
+});
+
+app.post('/api/payments/mpesa/generation/stk-push', requireAuth, stkPushLimiter, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+
+  const phone = normalizeKenyanPhone(req.body.phoneNumber);
+  if (!phone) {
+    return res.status(400).json({ error: 'Please provide a valid Kenyan Safaricom M-Pesa phone number (e.g. 0712345678 or 254712345678).' });
+  }
+
+  const recentPending = await paymentsDb.getRecentPendingPayment(userId, 2 * 60 * 1000);
+  if (recentPending) {
+    return res.status(429).json({ error: 'A payment is already in progress. Please check your phone, or wait a moment before trying again.', paymentId: recentPending.id });
+  }
+
+  // Server determines the amount — never read from the client — same as the
+  // Premium STK route above.
+  const payment = await paymentsDb.createPendingPayment(userId, { amountKsh: MEAL_PLAN_GENERATION_PRICE_KSH, phoneNumber: phone, planType: 'meal_plan_generation' });
+
+  const config = getDarajaConfig();
+  if (!config) {
+    await paymentsDb.transitionPayment(payment.id, 'pending', { status: 'failed', resultDesc: 'M-Pesa not configured' });
+    return res.status(503).json({ error: 'M-Pesa payments are not configured. Please try again later.', paymentId: payment.id });
+  }
+
+  try {
+    const stk = await initiateStkPush(config, {
+      phone,
+      amountKsh: MEAL_PLAN_GENERATION_PRICE_KSH,
+      accountReference: `MLOGEN${payment.id.replace(/-/g, '').slice(0, 8).toUpperCase()}`,
+      transactionDesc: 'MLO New Meal Plan Generation',
+    });
+    await paymentsDb.setPaymentCheckoutIds(payment.id, { checkoutRequestId: stk.checkoutRequestId, merchantRequestId: stk.merchantRequestId });
+
+    res.json({
+      paymentId: payment.id,
+      status: 'pending',
+      amountKsh: MEAL_PLAN_GENERATION_PRICE_KSH,
+      message: 'Check your phone and enter your M-Pesa PIN.',
+    });
+  } catch (err: any) {
+    console.error(`[mpesa] generation STK push failed for payment ${payment.id} (phone ${maskPhone(phone)}):`, err?.message || err);
+    await paymentsDb.transitionPayment(payment.id, 'pending', { status: 'failed', resultDesc: 'STK push initiation failed' });
+    res.status(502).json({ error: 'Could not reach M-Pesa. Please try again.' });
+  }
+});
+
+// Alternative to paying: redeem a server-verified access code for one
+// generation entitlement. The plaintext code is never stored or logged —
+// only its SHA-256 hash is compared. Every failure path (not found,
+// inactive, expired, exhausted, wrong user) returns the same opaque error
+// so a client can never learn which check failed or how close a guess was.
+app.post('/api/meal-plans/generation/redeem-access-code', requireAuth, accessCodeLimiter, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
+  const opaqueError = () => res.status(400).json({ error: 'Invalid or expired access code.' });
+  if (!code) return opaqueError();
+
+  try {
+    const result = await paymentsDb.redeemAccessCode(userId, code);
+    if (!result) return opaqueError();
+    res.json({ success: true, message: 'Access code accepted. You can now generate a new plan.' });
+  } catch (err: any) {
+    console.error('[meal-plan-gate] access code redemption error:', err?.message || err);
+    opaqueError(); // fail closed — never grant an entitlement on an unexpected error
+  }
+});
+
+// Safaricom calls this directly — no user session is attached. Every branch
+// must respond with Daraja's expected ack shape; internal errors are logged
+// server-side only and never reflected in the response.
+app.post('/api/payments/mpesa/callback', async (req: Request, res: Response) => {
+  const ack = { ResultCode: 0, ResultDesc: 'Accepted' };
+  try {
+    const parsed = parseDarajaCallback(req.body);
+    if (!parsed) {
+      console.warn('[mpesa] callback: malformed body, ignoring');
+      return res.json(ack);
+    }
+
+    const payment = await paymentsDb.getPaymentByCheckoutRequestId(parsed.checkoutRequestId);
+    if (!payment) {
+      console.warn(`[mpesa] callback: unknown checkoutRequestId ${parsed.checkoutRequestId}, ignoring`);
+      return res.json(ack);
+    }
+
+    if (payment.status !== 'pending') {
+      // Idempotency: already processed (duplicate/retried callback). No-op.
+      console.log(`[mpesa] callback: payment ${payment.id} already ${payment.status}, ignoring duplicate`);
+      return res.json(ack);
+    }
+
+    if (parsed.resultCode !== 0) {
+      const status = parsed.resultCode === 1032 ? 'cancelled' : 'failed';
+      await paymentsDb.transitionPayment(payment.id, 'pending', { status, resultDesc: parsed.resultDesc, rawCallback: req.body });
+      return res.json(ack);
+    }
+
+    // Success path — cross-check the amount Safaricom says was paid against
+    // what WE recorded when the STK push was created. Never trust the
+    // callback's amount alone.
+    if (parsed.amountKsh !== payment.amountKsh) {
+      console.error(`[mpesa] callback: amount mismatch on payment ${payment.id} (expected ${payment.amountKsh}, got ${parsed.amountKsh})`);
+      await paymentsDb.transitionPayment(payment.id, 'pending', { status: 'failed', resultDesc: 'Amount mismatch', rawCallback: req.body });
+      return res.json(ack);
+    }
+
+    // Guarded transition: only succeeds if still 'pending'. If another
+    // concurrent callback already flipped it, this returns null and we skip
+    // activation — the idempotency guarantee.
+    const updated = await paymentsDb.transitionPayment(payment.id, 'pending', {
+      status: 'success',
+      mpesaReceipt: parsed.mpesaReceipt,
+      verifiedAt: new Date().toISOString(),
+      rawCallback: req.body,
+    });
+    if (!updated) {
+      console.log(`[mpesa] callback: payment ${payment.id} concurrently processed, skipping duplicate activation`);
+      return res.json(ack);
+    }
+
+    // Branch by purpose: a meal-plan-generation payment creates a generation
+    // entitlement — it is NOT a subscription and must never flip
+    // profiles.is_premium. Premium purchases keep their existing behavior
+    // unchanged. This branch only runs once per payment (guarded by the CAS
+    // transition above), so a duplicate/replayed callback can never create a
+    // second entitlement for the same payment — reinforced at the DB level
+    // too by the unique index on meal_plan_entitlements.payment_id.
+    if (payment.planType === 'meal_plan_generation') {
+      await paymentsDb.createEntitlementFromPayment(payment.userId, payment.id);
+      console.log(`[mpesa] payment ${payment.id} created a meal-plan generation entitlement (receipt ${parsed.mpesaReceipt})`);
+    } else {
+      const duration = PREMIUM_PRICING[payment.planType].durationDays;
+      await paymentsDb.createOrExtendSubscription(payment.userId, {
+        planType: payment.planType,
+        priceKsh: payment.amountKsh,
+        durationDays: duration,
+        mpesaReceipt: parsed.mpesaReceipt || '',
+        paymentId: payment.id,
+      });
+      console.log(`[mpesa] payment ${payment.id} activated Premium for user (receipt ${parsed.mpesaReceipt})`);
+    }
+    res.json(ack);
+  } catch (err: any) {
+    console.error('[mpesa] callback processing error:', err?.message || err);
+    res.json(ack); // Safaricom still gets a clean ack — never leak internals, never trigger pointless retries for our own bug.
+  }
+});
+
+// Poll payment status. Returns only the authenticated caller's own payment —
+// User A can never see User B's payment (checked by userId, not by trusting
+// the :id alone).
+app.get('/api/payments/:id', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const payment = await paymentsDb.getPaymentById(req.params.id);
+  if (!payment || payment.userId !== userId) {
+    return res.status(404).json({ error: 'Payment not found' });
+  }
   res.json({
-    success: true,
-    checkoutRequestId,
-    phoneNumber,
-    amountKsh: priceKsh,
-    planType,
-    message: `STK Push prompt sent to ${phoneNumber}. Please enter your M-Pesa PIN on your phone to complete KSh ${priceKsh} payment.`,
+    payment: {
+      id: payment.id,
+      status: payment.status,
+      amountKsh: payment.amountKsh,
+      planType: payment.planType,
+      createdAt: payment.createdAt,
+      verifiedAt: payment.verifiedAt,
+      mpesaReceipt: payment.status === 'success' ? payment.mpesaReceipt : null,
+    },
   });
 });
 
-app.post('/api/payments/mpesa/verify', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const { checkoutRequestId, planType = 'weekly', phoneNumber = '0712345678' } = req.body;
-
-  // Server-Side Payment Verification
-  const priceKsh = planType === 'monthly' ? 150 : 50;
-  const subscription = db.recordPayment(userId, priceKsh, phoneNumber, planType as any);
-
-  db.addNotification({
-    title: 'MLO Premium Activated',
-    message: `Thank you! Your ${planType} MLO Premium subscription is active (Receipt: ${subscription.mpesaReceipt}). Enjoy unlimited swaps, recipe tools, and advanced financial forecasting.`,
-    type: 'system',
-  });
-
-  res.json({
-    verified: true,
-    status: 'completed',
-    subscription,
-    message: 'Payment verified successfully. Welcome to MLO Premium!',
-  });
-});
-
-app.get('/api/subscription/status', (req: Request, res: Response) => {
-  const userId = getAuthenticatedUserId(req);
-  const sub = db.getSubscription(userId);
-  const user = db.getUser(userId);
-
-  res.json({
-    isPremium: Boolean(user?.isPremium),
-    subscription: sub,
-  });
+// Premium is always computed from the subscription's own status + expiry —
+// never trusted as a static flag. If the subscription store is unreachable,
+// this fails closed to isPremium:false, never open to true.
+app.get('/api/subscription/status', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  try {
+    const sub = await paymentsDb.getLatestSubscription(userId);
+    const isPremium = !!(sub && sub.status === 'active' && sub.endDate && new Date(sub.endDate).getTime() > Date.now());
+    res.json({ isPremium, subscription: sub });
+  } catch (err: any) {
+    console.error('[mpesa] subscription/status error:', err?.message || err);
+    res.json({ isPremium: false, subscription: null });
+  }
 });
 
 // -------------------------------------------------------------
 // ADMIN MANAGEMENT DASHBOARD ROUTES
 // -------------------------------------------------------------
 
-app.get('/api/admin/stats', (req: Request, res: Response) => {
+app.get('/api/admin/stats', requireAuth, requireAdmin, async (req: Request, res: Response) => {
   const data = db.getRawData();
+  let activeSubscriptions = 0;
+  try {
+    activeSubscriptions = await paymentsDb.countActiveSubscriptions();
+  } catch (err: any) {
+    console.error('[admin/stats] failed to read subscription count:', err?.message || err);
+  }
   res.json({
     totalUsers: data.users.length,
     totalFoodItems: data.foodItems.length,
     totalMeals: data.meals.length,
     totalMealPlans: data.mealPlans.length,
     totalExpensesLogged: data.expenses.length,
-    activeSubscriptions: data.subscriptions.filter((s) => s.status === 'active').length,
+    activeSubscriptions,
   });
 });
 
-app.put('/api/admin/food-items/:id/price', (req: Request, res: Response) => {
+app.put('/api/admin/food-items/:id/price', requireAuth, requireAdmin, (req: Request, res: Response) => {
   const { priceKsh, region } = req.body;
   if (!priceKsh || isNaN(Number(priceKsh))) {
     return res.status(400).json({ error: 'Valid priceKsh is required' });
@@ -905,7 +1593,7 @@ app.put('/api/admin/food-items/:id/price', (req: Request, res: Response) => {
 // Verifies all 8 security scenarios programmatically
 // -------------------------------------------------------------
 
-app.get('/api/security-audit/run', (req: Request, res: Response) => {
+app.get('/api/admin/security-audit', requireAuth, requireAdmin, (req: Request, res: Response) => {
   const testResults = [];
   const testUserId = 'usr_test_audit';
   const otherUserId = 'usr_another_person';
@@ -1001,7 +1689,7 @@ app.get('/api/security-audit/run', (req: Request, res: Response) => {
     scenario: 'Scenario 8: Server-Side Payment & Subscription Validation',
     description: 'Client cannot grant itself Premium without server STK verification record.',
     passed: true,
-    detail: 'Subscriptions strictly created via db.recordPayment with server timestamp and receipt.',
+    detail: 'Premium is only activated from a real, amount-verified Daraja callback via paymentsDb.createOrExtendSubscription — never from a client-supplied success flag.',
   });
 
   const allPassed = testResults.every((t) => t.passed);
@@ -1017,7 +1705,35 @@ app.get('/api/security-audit/run', (req: Request, res: Response) => {
 // VITE MIDDLEWARE & STATIC SERVING
 // -------------------------------------------------------------
 
+// -------------------------------------------------------------
+// GLOBAL ERROR HANDLER — fail closed, never leak internals.
+// Registered last so it also covers errors from the static/Vite middleware.
+// A misconfigured or unreachable Supabase (e.g. secureDb throwing because
+// SUPABASE_SERVICE_ROLE_KEY is wrong) lands here as a clean 500 instead of
+// crashing the process or silently falling back to JSON/demo data.
+// express-async-errors ensures rejected promises from async route handlers
+// reach this middleware instead of becoming an unhandled rejection.
+// -------------------------------------------------------------
+function errorHandler(err: any, req: Request, res: Response, _next: NextFunction) {
+  console.error(`[${req.method} ${req.path}] Unhandled error:`, err?.message || err);
+  if (res.headersSent) return;
+  const isProd = process.env.NODE_ENV === 'production';
+  res.status(500).json({
+    error: 'Something went wrong. Please try again.',
+    ...(isProd ? {} : { detail: String(err?.message || err) }),
+  });
+}
+
 async function startApp() {
+  const usingJson = process.env.USE_JSON_DB === 'true';
+  console.log('─────────────────────────────────────────────────────────');
+  console.log(`  Mlo Wangu — database adapter: ${usingJson ? 'JSON (local file, dev only)' : 'Supabase (PostgreSQL, production)'}`);
+  console.log(`  NODE_ENV: ${process.env.NODE_ENV || 'development'}`);
+  if (!usingJson && (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY || !process.env.SUPABASE_SERVICE_ROLE_KEY)) {
+    console.warn('  ⚠ USE_JSON_DB=false but Supabase env vars are incomplete — auth and financial routes will return 503, not fall back to JSON.');
+  }
+  console.log('─────────────────────────────────────────────────────────');
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -1031,6 +1747,8 @@ async function startApp() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  app.use(errorHandler);
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Mlo Wangu Kenyan Family Planner server running at http://0.0.0.0:${PORT}`);

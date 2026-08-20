@@ -9,7 +9,6 @@ import {
   Droplet,
   Bot,
   ChefHat,
-  Shield,
   ShieldCheck,
   Lock,
   Unlock,
@@ -37,7 +36,6 @@ export const Sidebar: React.FC = () => {
     { id: 'shopping', label: 'Smart Shopping List', icon: ShoppingBasket },
     { id: 'ai', label: 'Mlo Wangu Nutritionist', icon: Bot },
     { id: 'budget', label: 'Private Budget & Goals', icon: Wallet, privateSection: true },
-    { id: 'admin', label: 'Price Admin & Audit', icon: Shield },
   ];
 
   return (

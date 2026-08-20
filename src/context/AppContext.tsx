@@ -12,10 +12,10 @@ import {
   NotificationItem,
   OverspendingAnalysis,
 } from '../types';
-import { api, setFinancialToken, getStoredFinancialToken } from '../services/api';
+import { api } from '../services/api';
 import confetti from 'canvas-confetti';
 
-export type ActiveTab = 'home' | 'meals' | 'family' | 'shopping' | 'budget' | 'cook-ksh' | 'ai' | 'admin';
+export type ActiveTab = 'home' | 'meals' | 'family' | 'shopping' | 'budget' | 'cook-ksh' | 'ai';
 
 interface FinancialSummaryData {
   month: string;
@@ -59,20 +59,27 @@ interface AppContextType {
   setIsLogExpenseModalOpen: (open: boolean) => void;
   isPremiumModalOpen: boolean;
   setIsPremiumModalOpen: (open: boolean) => void;
+  isGeneratePlanModalOpen: boolean;
+  setIsGeneratePlanModalOpen: (open: boolean) => void;
 
   // Budget Security & Private State
   isBudgetUnlocked: boolean;
   financialSummary: FinancialSummaryData | null;
   unlockBudget: (pin: string) => Promise<boolean>;
   lockBudget: () => Promise<void>;
-  setupBudgetPin: (pin: string) => Promise<boolean>;
+  setupBudgetPin: (pin: string, confirmPin?: string) => Promise<boolean>;
   refreshFinancialData: () => Promise<void>;
 
   // Public Actions
   logWater: (amountMl: number) => Promise<void>;
   toggleShoppingItem: (itemId: string) => Promise<void>;
   swapMeal: (day: string, mealType: string, currentMealId: string, reason?: 'cheaper' | 'faster' | 'random') => Promise<void>;
-  regenerateMealPlan: (budgetAware?: boolean) => Promise<void>;
+  regenerateMealPlan: (budgetAware?: boolean) => Promise<boolean>;
+  // Gate entry point for the "Generate New Plan" button: checks the server
+  // for an existing entitlement and either generates immediately or opens
+  // the payment/access-code modal. The actual authorization is enforced
+  // server-side regardless of what this reports.
+  attemptGeneratePlan: () => Promise<void>;
   updateHousehold: (updated: Household) => Promise<void>;
   refreshAll: () => Promise<void>;
   logExpense: (data: { amountKsh: number; category: string; description: string; date?: string }) => Promise<void>;
@@ -103,6 +110,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isPinSetupModalOpen, setIsPinSetupModalOpen] = useState(false);
   const [isLogExpenseModalOpen, setIsLogExpenseModalOpen] = useState(false);
   const [isPremiumModalOpen, setIsPremiumModalOpen] = useState(false);
+  const [isGeneratePlanModalOpen, setIsGeneratePlanModalOpen] = useState(false);
 
   // Financial Security
   const [isBudgetUnlocked, setIsBudgetUnlocked] = useState<boolean>(false);
@@ -152,26 +160,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, []);
 
-  // Check if there is an existing financial session on load
+  // On mount, check whether the server-side HttpOnly session cookie is still valid.
+  // The cookie is sent automatically by the browser — no token management needed here.
   const checkInitialFinancialStatus = useCallback(async () => {
-    const existingToken = getStoredFinancialToken();
-    if (existingToken) {
-      try {
-        const res = await api.checkFinancialStatus();
-        if (res.isUnlocked) {
-          setIsBudgetUnlocked(true);
-          const summary = await api.getFinancialSummary();
-          setFinancialSummary(summary);
-        } else {
-          setFinancialToken(null);
-          setIsBudgetUnlocked(false);
-          setFinancialSummary(null);
-        }
-      } catch {
-        setFinancialToken(null);
-        setIsBudgetUnlocked(false);
-        setFinancialSummary(null);
+    try {
+      const res = await api.checkFinancialStatus();
+      if (res.isUnlocked) {
+        setIsBudgetUnlocked(true);
+        const summary = await api.getFinancialSummary();
+        setFinancialSummary(summary);
       }
+    } catch {
+      setIsBudgetUnlocked(false);
+      setFinancialSummary(null);
     }
   }, []);
 
@@ -180,49 +181,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     checkInitialFinancialStatus();
   }, [loadPublicData, checkInitialFinancialStatus]);
 
-  // Unlock Budget Method (Verifies PIN server-side, saves session token)
+  // Unlock Budget — PIN is verified server-side; the server sets the HttpOnly cookie.
   const unlockBudget = async (pin: string): Promise<boolean> => {
     try {
       const res = await api.unlockBudget(pin);
-      if (res.unlocked && res.financialToken) {
-        setFinancialToken(res.financialToken);
+      if (res.unlocked) {
         setIsBudgetUnlocked(true);
         setIsPinModalOpen(false);
-
-        // Fetch private financial summary
         const summary = await api.getFinancialSummary();
         setFinancialSummary(summary);
         return true;
       }
       return false;
     } catch (err: any) {
-      console.error('PIN verification error:', err);
       throw err;
     }
   };
 
-  // Lock Budget Method (Purges tokens on server & client)
+  // Lock Budget — server clears the HttpOnly cookie; frontend drops cached data.
   const lockBudget = async () => {
     try {
       await api.lockBudget().catch(() => {});
     } finally {
-      setFinancialToken(null);
       setIsBudgetUnlocked(false);
       setFinancialSummary(null);
     }
   };
 
-  // Setup New Budget PIN
-  const setupBudgetPin = async (pin: string): Promise<boolean> => {
+  // Create / change Budget PIN — server sets cookie immediately after setup.
+  const setupBudgetPin = async (pin: string, confirmPin?: string): Promise<boolean> => {
     try {
-      const res = await api.setupBudgetPin(pin);
-      if (res.success && res.financialToken) {
-        setFinancialToken(res.financialToken);
+      const res = await api.setupBudgetPin(pin, confirmPin);
+      if (res.success) {
         setIsBudgetUnlocked(true);
         setIsPinSetupModalOpen(false);
-        if (user) {
-          setUser({ ...user, hasBudgetPin: true });
-        }
+        if (user) setUser({ ...user, hasBudgetPin: true });
         const summary = await api.getFinancialSummary();
         setFinancialSummary(summary);
         triggerConfetti();
@@ -230,7 +223,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return false;
     } catch (err: any) {
-      console.error('PIN setup error:', err);
       throw err;
     }
   };
@@ -286,16 +278,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Regenerate Meal Plan
-  const regenerateMealPlan = async (budgetAware = false) => {
+  // Regenerate Meal Plan. Does not check entitlement itself — the server's
+  // POST /api/meal-plans/generate is the sole authority and returns 402
+  // PAYMENT_REQUIRED if the caller has none; callers that want the
+  // check-then-generate-or-pay flow should go through attemptGeneratePlan
+  // below instead of calling this directly. Rethrows on failure so a caller
+  // can distinguish PAYMENT_REQUIRED (err.code) from any other error.
+  const regenerateMealPlan = async (budgetAware = false): Promise<boolean> => {
+    const res = await api.generateMealPlan({ budgetAware });
+    setMealPlan(res.mealPlan);
+    const sRes = await api.getShoppingList();
+    if (sRes?.shoppingList) setShoppingList(sRes.shoppingList);
+    triggerConfetti();
+    return true;
+  };
+
+  // Entry point for the "Generate New Plan" button. Asks the server whether
+  // an entitlement already exists; if so, generates immediately, otherwise
+  // opens the payment/access-code modal instead of attempting generation.
+  const attemptGeneratePlan = async () => {
     try {
-      const res = await api.generateMealPlan({ budgetAware });
-      setMealPlan(res.mealPlan);
-      const sRes = await api.getShoppingList();
-      if (sRes?.shoppingList) setShoppingList(sRes.shoppingList);
-      triggerConfetti();
-    } catch (err) {
-      console.error('Error generating meal plan:', err);
+      const { hasEntitlement } = await api.getGenerationEntitlementStatus();
+      if (hasEntitlement) {
+        await regenerateMealPlan(false);
+      } else {
+        setIsGeneratePlanModalOpen(true);
+      }
+    } catch (err: any) {
+      if (err?.code === 'PAYMENT_REQUIRED') {
+        // Rare race: entitlement-status said yes but generate() itself
+        // (the real authority) said no by the time it ran — fall back to
+        // the modal rather than silently failing.
+        setIsGeneratePlanModalOpen(true);
+      } else {
+        console.error('Error checking meal-plan generation entitlement:', err);
+      }
     }
   };
 
@@ -367,6 +384,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsLogExpenseModalOpen,
         isPremiumModalOpen,
         setIsPremiumModalOpen,
+        isGeneratePlanModalOpen,
+        setIsGeneratePlanModalOpen,
         isBudgetUnlocked,
         financialSummary,
         unlockBudget,
@@ -377,6 +396,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toggleShoppingItem,
         swapMeal,
         regenerateMealPlan,
+        attemptGeneratePlan,
         updateHousehold,
         refreshAll: loadPublicData,
         logExpense,

@@ -13,12 +13,12 @@ export const PinSetupModal: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (newPin.length < 4 || newPin.length > 6) {
-      setError('PIN must be 4 to 6 digits');
+    if (!/^\d{6}$/.test(newPin)) {
+      setError('PIN must be exactly 6 numeric digits.');
       return;
     }
     if (newPin !== confirmPin) {
-      setError('PINs do not match');
+      setError('PINs do not match. Please try again.');
       return;
     }
 
@@ -26,10 +26,10 @@ export const PinSetupModal: React.FC = () => {
     setError('');
 
     try {
-      await setupBudgetPin(newPin);
+      await setupBudgetPin(newPin, confirmPin);
       setIsPinSetupModalOpen(false);
     } catch (err: any) {
-      setError(err.message || 'Failed to update PIN');
+      setError(err.message || 'Failed to save PIN. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -49,9 +49,9 @@ export const PinSetupModal: React.FC = () => {
           <div className="w-12 h-12 rounded-2xl bg-white/10 border border-white/20 flex items-center justify-center mx-auto mb-3">
             <KeyRound className="w-6 h-6 text-[#F4B942]" />
           </div>
-          <h3 className="text-xl font-extrabold text-white">Set Budget PIN</h3>
+          <h3 className="text-xl font-extrabold text-white">Create Your Budget PIN</h3>
           <p className="text-xs text-blue-200 mt-1">
-            Choose a 4-6 digit numeric PIN to protect your household salary and financial logs.
+            Choose a private 6-digit numeric PIN to protect your household salary and financial records.
           </p>
         </div>
 
@@ -64,15 +64,16 @@ export const PinSetupModal: React.FC = () => {
 
         <form onSubmit={handleSubmit} className="mt-6 space-y-4 text-xs">
           <div>
-            <label className="font-bold text-blue-200 block mb-1">New 4-6 Digit PIN</label>
+            <label className="font-bold text-blue-200 block mb-1">6-Digit PIN</label>
             <input
               type="password"
               inputMode="numeric"
               maxLength={6}
+              minLength={6}
               required
-              placeholder="e.g. 4829"
+              placeholder="6 digits"
               value={newPin}
-              onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ''))}
+              onChange={(e) => setNewPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
               className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-2xl text-center text-lg font-mono tracking-widest text-white focus:outline-none focus:ring-2 focus:ring-[#F4B942]"
             />
           </div>
@@ -93,7 +94,7 @@ export const PinSetupModal: React.FC = () => {
 
           <button
             type="submit"
-            disabled={isLoading || newPin.length < 4}
+            disabled={isLoading || newPin.length < 6 || confirmPin.length < 6}
             className="w-full py-3.5 px-4 bg-[#F4B942] hover:bg-[#E5A72E] text-[#17201A] font-extrabold text-xs rounded-2xl transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
           >
             <Check className="w-4 h-4" />

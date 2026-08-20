@@ -22,7 +22,13 @@ const DB_FILE = path.join(process.cwd(), 'data', 'mlo_database.json');
 
 // Interface for persistent store
 export interface DatabaseSchema {
-  users: (UserProfile & { passwordHash?: string; pinHash?: string; pinSalt?: string })[];
+  users: (UserProfile & {
+    passwordHash?: string;
+    pinHash?: string;
+    pinSalt?: string;
+    pinFailedAttempts?: number;
+    pinLockedUntil?: number | null;
+  })[];
   households: Household[];
   foodItems: FoodItem[];
   meals: Meal[];
@@ -48,17 +54,13 @@ function getInitialData(): DatabaseSchema {
     name: 'Mwangi Njoroge',
     email: 'bstringrecords@gmail.com',
     role: 'user',
-    hasBudgetPin: true,
+    hasBudgetPin: false,   // No default PIN — user must create their own 6-digit PIN
     isPremium: true,
     premiumExpiry: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
     createdAt: new Date().toISOString(),
+    pinFailedAttempts: 0,
+    pinLockedUntil: null,
   };
-
-  // Set default PIN to "1234" with PBKDF2 salt and hash
-  const defaultSalt = crypto.randomBytes(16).toString('hex');
-  const defaultPinHash = crypto.pbkdf2Sync('1234', defaultSalt, 10000, 64, 'sha256').toString('hex');
-  defaultUser.pinSalt = defaultSalt;
-  defaultUser.pinHash = defaultPinHash;
 
   const defaultHousehold: Household = {
     id: defaultHouseholdId,
@@ -357,6 +359,45 @@ class DatabaseManager {
     return crypto.timingSafeEqual(Buffer.from(user.pinHash, 'hex'), Buffer.from(verifyHash, 'hex'));
   }
 
+  // PIN lockout management (progressive: 5+ failures → 5 min, 10+ → 30 min)
+  public checkPinLockout(userId: string): { locked: boolean; secondsRemaining: number } {
+    const user = this.getUser(userId);
+    if (!user || !user.pinLockedUntil) return { locked: false, secondsRemaining: 0 };
+    if (user.pinLockedUntil > Date.now()) {
+      return { locked: true, secondsRemaining: Math.ceil((user.pinLockedUntil - Date.now()) / 1000) };
+    }
+    // Lockout expired — clear it
+    user.pinLockedUntil = null;
+    this.saveData();
+    return { locked: false, secondsRemaining: 0 };
+  }
+
+  public recordPinFailure(userId: string) {
+    const user = this.getUser(userId);
+    if (!user) return;
+    user.pinFailedAttempts = (user.pinFailedAttempts || 0) + 1;
+    const attempts = user.pinFailedAttempts;
+    if (attempts >= 10) {
+      user.pinLockedUntil = Date.now() + 30 * 60 * 1000; // 30 min
+    } else if (attempts >= 5) {
+      user.pinLockedUntil = Date.now() + 5 * 60 * 1000;  // 5 min
+    }
+    this.saveData();
+  }
+
+  public resetPinAttempts(userId: string) {
+    const user = this.getUser(userId);
+    if (!user) return;
+    user.pinFailedAttempts = 0;
+    user.pinLockedUntil = null;
+    this.saveData();
+  }
+
+  // Look up a financial session by token (returns the full session record)
+  public getFinancialSession(token: string): { token: string; userId: string; expiresAt: number } | undefined {
+    return this.data.financialSessions.find((s) => s.token === token);
+  }
+
   public createFinancialSession(userId: string, durationMinutes = 15): string {
     // Invalidate old sessions for this user
     this.data.financialSessions = this.data.financialSessions.filter((s) => s.userId !== userId && s.expiresAt > Date.now());
@@ -508,12 +549,18 @@ class DatabaseManager {
     return null;
   }
 
-  public getMeals() {
-    return this.data.meals;
+  // System meals (no ownerId) are visible to everyone. Custom meals are visible
+  // only to their owner. requesterId is the server-verified authenticated user
+  // (or undefined for anonymous catalog browsing, which sees system meals only).
+  public getMeals(requesterId?: string) {
+    return this.data.meals.filter((m) => !m.ownerId || m.ownerId === requesterId);
   }
 
-  public getMealById(id: string) {
-    return this.data.meals.find((m) => m.id === id);
+  public getMealById(id: string, requesterId?: string) {
+    const meal = this.data.meals.find((m) => m.id === id);
+    if (!meal) return undefined;
+    if (meal.ownerId && meal.ownerId !== requesterId) return undefined;
+    return meal;
   }
 
   public addMeal(meal: Meal): Meal {
@@ -527,8 +574,10 @@ class DatabaseManager {
     return meal;
   }
 
-  public deleteMeal(id: string): boolean {
-    const idx = this.data.meals.findIndex((m) => m.id === id);
+  // Only the meal's owner may delete it; system meals (no ownerId) can never be
+  // deleted through this path.
+  public deleteMeal(id: string, requesterId: string): boolean {
+    const idx = this.data.meals.findIndex((m) => m.id === id && m.ownerId === requesterId);
     if (idx !== -1) {
       this.data.meals.splice(idx, 1);
       this.saveData();
@@ -538,8 +587,13 @@ class DatabaseManager {
   }
 
   // Meal Plans
+  // NOTE: previously fell back to `mealPlans[0]` (the first record in the whole
+  // store) when the requesting user had none yet. That's a cross-user leak once
+  // real, distinct authenticated user IDs are in play — removed. `undefined`
+  // means "no plan for this user this week yet", which the frontend already
+  // treats as a valid empty state.
   public getMealPlan(userId: string, weekStartDate = getMondayOfCurrentWeek()): WeeklyMealPlan | undefined {
-    return this.data.mealPlans.find((p) => p.userId === userId && p.weekStartDate === weekStartDate) || this.data.mealPlans[0];
+    return this.data.mealPlans.find((p) => p.userId === userId && p.weekStartDate === weekStartDate);
   }
 
   public saveMealPlan(plan: WeeklyMealPlan) {
@@ -562,9 +616,9 @@ class DatabaseManager {
     return plan;
   }
 
-  // Household
+  // Household — see getMealPlan note above: no cross-user fallback.
   public getHousehold(userId: string): Household | undefined {
-    return this.data.households.find((h) => h.ownerId === userId) || this.data.households[0];
+    return this.data.households.find((h) => h.ownerId === userId);
   }
 
   public updateHousehold(household: Household) {
@@ -578,9 +632,9 @@ class DatabaseManager {
     return household;
   }
 
-  // Shopping List
+  // Shopping List — see getMealPlan note above: no cross-user fallback.
   public getShoppingList(userId: string, weekStartDate = getMondayOfCurrentWeek()): ShoppingList | undefined {
-    return this.data.shoppingLists.find((s) => s.userId === userId && s.weekStartDate === weekStartDate) || this.data.shoppingLists[0];
+    return this.data.shoppingLists.find((s) => s.userId === userId && s.weekStartDate === weekStartDate);
   }
 
   public saveShoppingList(list: ShoppingList) {
@@ -690,17 +744,23 @@ class DatabaseManager {
     return sub;
   }
 
-  // Notifications
+  // Notifications — global (no userId) are visible to everyone; personal
+  // (userId set) are visible only to their owner.
   public getNotifications(userId: string): NotificationItem[] {
-    return this.data.notifications;
+    return this.data.notifications.filter((n) => !n.userId || n.userId === userId);
   }
 
-  public markNotificationRead(id: string) {
+  // Only the owner of a personal notification may mark it read. Global
+  // notifications (no userId) have no per-user read state in this data
+  // model, so marking one read is a shared, app-wide action — not a
+  // privacy issue since global notifications carry no private data.
+  public markNotificationRead(id: string, userId: string): boolean {
     const notif = this.data.notifications.find((n) => n.id === id);
-    if (notif) {
-      notif.isRead = true;
-      this.saveData();
-    }
+    if (!notif) return false;
+    if (notif.userId && notif.userId !== userId) return false;
+    notif.isRead = true;
+    this.saveData();
+    return true;
   }
 
   public addNotification(notif: Omit<NotificationItem, 'id' | 'createdAt' | 'isRead'>) {

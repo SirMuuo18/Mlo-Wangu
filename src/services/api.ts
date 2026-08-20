@@ -14,44 +14,25 @@ import {
   OverspendingAnalysis,
 } from '../types';
 
-let currentFinancialToken: string | null = null;
-let currentUserId: string = 'usr_mwangi_demo';
-
-export function setFinancialToken(token: string | null) {
-  currentFinancialToken = token;
-  if (token) {
-    sessionStorage.setItem('mlo_financial_token', token);
-  } else {
-    sessionStorage.removeItem('mlo_financial_token');
-  }
-}
-
-export function getStoredFinancialToken(): string | null {
-  if (!currentFinancialToken) {
-    currentFinancialToken = sessionStorage.getItem('mlo_financial_token');
-  }
-  return currentFinancialToken;
-}
-
-export function setAuthenticatedUserId(userId: string) {
-  currentUserId = userId;
-}
+// The financial session is an HttpOnly cookie managed entirely by the server.
+// The frontend never stores, reads, or sends the session token manually.
+// These exports are kept for backward compatibility but are intentional no-ops.
+export function setFinancialToken(_token: string | null) { /* cookie is server-managed */ }
+export function getStoredFinancialToken(): null { return null; }
+export function setAuthenticatedUserId(_userId: string) { /* server resolves user from session */ }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'x-user-id': currentUserId,
     ...(options.headers as Record<string, string> || {}),
   };
 
-  const finToken = getStoredFinancialToken();
-  if (finToken) {
-    headers['x-financial-token'] = finToken;
-  }
-
+  // credentials:'include' ensures the HttpOnly mlo_fin_session cookie is sent
+  // on same-origin requests — the browser handles this automatically.
   const response = await fetch(endpoint, {
     ...options,
     headers,
+    credentials: 'include',
   });
 
   if (!response.ok) {
@@ -114,6 +95,24 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  // "Generate New Plan" gate — KSh 50 payment or access code buys one new
+  // generation. Viewing the current plan above is always free. The server
+  // is the sole authority: this status check is only a UX shortcut to avoid
+  // flashing the payment modal for users who already have an entitlement —
+  // generateMealPlan() itself can still return 402 PAYMENT_REQUIRED.
+  getGenerationEntitlementStatus: () =>
+    request<{ hasEntitlement: boolean; priceKsh: number }>('/api/meal-plans/generation/entitlement-status'),
+  sendGenerationMpesaStkPush: (phoneNumber: string) =>
+    request<{ paymentId: string; status: string; amountKsh: number; message: string }>('/api/payments/mpesa/generation/stk-push', {
+      method: 'POST',
+      body: JSON.stringify({ phoneNumber }),
+    }),
+  redeemAccessCode: (code: string) =>
+    request<{ success: boolean; message: string }>('/api/meal-plans/generation/redeem-access-code', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
+
   // Household
   getHousehold: () => request<{ household: Household }>('/api/household'),
   updateHousehold: (household: Household) =>
@@ -143,30 +142,30 @@ export const api = {
       body: JSON.stringify({ config }),
     }),
 
-  // Financial Auth
-  setupBudgetPin: (pin: string) =>
-    request<{ success: boolean; message: string; financialToken: string }>('/api/financial-auth/setup-pin', {
+  // Financial Auth — cookie is set/cleared server-side; frontend just calls these endpoints
+  setupBudgetPin: (pin: string, confirmPin?: string) =>
+    request<{ success: boolean; message: string }>('/api/financial-auth/setup-pin', {
+      method: 'POST',
+      body: JSON.stringify({ pin, confirmPin }),
+    }),
+  unlockBudget: (pin: string) =>
+    request<{ unlocked: boolean; message: string }>('/api/financial-auth/unlock', {
       method: 'POST',
       body: JSON.stringify({ pin }),
-    }),
-  unlockBudget: (pin: string, timeoutMinutes = 15) =>
-    request<{ unlocked: boolean; financialToken: string; message: string }>('/api/financial-auth/unlock', {
-      method: 'POST',
-      body: JSON.stringify({ pin, timeoutMinutes }),
     }),
   lockBudget: () =>
     request<{ locked: boolean; message: string }>('/api/financial-auth/lock', {
       method: 'POST',
     }),
-  checkFinancialStatus: () => request<{ isUnlocked: boolean; userId: string }>('/api/financial-auth/status'),
+  checkFinancialStatus: () => request<{ isUnlocked: boolean }>('/api/financial-auth/status'),
 
-  // Private Financial Data (Requires Financial Token)
+  // Private Financial Data (requires valid HttpOnly session cookie)
   getBudget: (month?: string) => {
     const q = month ? `?month=${month}` : '';
     return request<{ budget: UserBudget }>(`/api/financial/budget${q}`);
   },
   updateBudget: (budget: UserBudget) =>
-    request<{ budget: UserBudget }>('/api/financial/budget', {
+    request<{ budget: UserBudget; validation: { totalAllocatedKsh: number; differenceKsh: number; status: string; message: string } }>('/api/financial/budget', {
       method: 'PUT',
       body: JSON.stringify({ budget }),
     }),
@@ -204,18 +203,17 @@ export const api = {
       body: JSON.stringify({ message }),
     }),
 
-  // Payments & Subscription
+  // Payments & Subscription — Premium only ever activates from the server's
+  // own verified Daraja callback. The frontend never asserts success; it
+  // polls /api/payments/:id for the server's actual recorded status.
   sendMpesaStkPush: (phoneNumber: string, planType: 'weekly' | 'monthly') =>
-    request<{ success: boolean; checkoutRequestId: string; message: string; amountKsh: number }>('/api/payments/mpesa/stk-push', {
+    request<{ paymentId: string; status: string; amountKsh: number; planType: string; message: string }>('/api/payments/mpesa/stk-push', {
       method: 'POST',
       body: JSON.stringify({ phoneNumber, planType }),
     }),
-  verifyMpesaPayment: (checkoutRequestId: string, planType: 'weekly' | 'monthly', phoneNumber: string) =>
-    request<{ verified: boolean; subscription: Subscription; message: string }>('/api/payments/mpesa/verify', {
-      method: 'POST',
-      body: JSON.stringify({ checkoutRequestId, planType, phoneNumber }),
-    }),
-  getSubscriptionStatus: () => request<{ isPremium: boolean; subscription?: Subscription }>('/api/subscription/status'),
+  getPaymentStatus: (paymentId: string) =>
+    request<{ payment: { id: string; status: 'pending' | 'success' | 'failed' | 'cancelled' | 'expired'; amountKsh: number; planType: string; createdAt: string; verifiedAt: string | null; mpesaReceipt: string | null } }>(`/api/payments/${paymentId}`),
+  getSubscriptionStatus: () => request<{ isPremium: boolean; subscription?: Subscription | null }>('/api/subscription/status'),
 
   // Notifications
   getNotifications: () => request<{ notifications: NotificationItem[] }>('/api/notifications'),
@@ -228,5 +226,5 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ priceKsh, region }),
     }),
-  runSecurityAudit: () => request<{ auditPassed: boolean; testsCount: number; results: any[]; timestamp: string }>('/api/security-audit/run'),
+  runSecurityAudit: () => request<{ auditPassed: boolean; testsCount: number; results: any[]; timestamp: string }>('/api/admin/security-audit'),
 };

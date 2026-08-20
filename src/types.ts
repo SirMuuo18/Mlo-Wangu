@@ -50,6 +50,7 @@ export interface Meal {
   servings: number;
   kenyanCookingTips?: string;
   isCustom?: boolean;
+  ownerId?: string; // undefined/null = system meal (public, read-only); set = private custom meal
 }
 
 export interface HouseholdMember {
@@ -202,4 +203,5 @@ export interface NotificationItem {
   type: 'water' | 'meal' | 'grocery' | 'budget' | 'system';
   isRead: boolean;
   createdAt: string;
+  userId?: string; // undefined/null = global notification (visible to all); set = private to that user
 }

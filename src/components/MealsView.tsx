@@ -26,7 +26,7 @@ export const MealsView: React.FC = () => {
     household,
     setSelectedMealForRecipe,
     setSelectedMealForSwap,
-    regenerateMealPlan,
+    attemptGeneratePlan,
     setActiveTab,
   } = useApp();
 
@@ -40,10 +40,14 @@ export const MealsView: React.FC = () => {
 
   const daysList: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
-  const handleGeneratePlan = async (budgetAware = false) => {
+  // Generating a NEW plan is gated behind a KSh 50 payment or access code —
+  // viewing the existing plan above is always free. This only checks
+  // entitlement and either generates or opens the payment modal; the actual
+  // authorization is enforced server-side regardless.
+  const handleGeneratePlan = async () => {
     setIsGenerating(true);
     try {
-      await regenerateMealPlan(budgetAware);
+      await attemptGeneratePlan();
     } finally {
       setIsGenerating(false);
     }
@@ -102,12 +106,12 @@ export const MealsView: React.FC = () => {
 
           <div className="flex flex-wrap items-center gap-2">
             <button
-              onClick={() => handleGeneratePlan(false)}
+              onClick={() => handleGeneratePlan()}
               disabled={isGenerating}
               className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#14532D] text-white text-xs font-bold hover:bg-[#0f3e22] transition-all shadow-xs cursor-pointer disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isGenerating ? 'animate-spin' : ''}`} />
-              <span>{isGenerating ? 'Planning...' : 'Generate New Plan'}</span>
+              <span>{isGenerating ? 'Checking...' : 'Generate New Plan'}</span>
             </button>
           </div>
         </div>
@@ -197,10 +201,11 @@ export const MealsView: React.FC = () => {
                 Create a healthy, budget-friendly Kenyan meal plan for your household.
               </p>
               <button
-                onClick={() => handleGeneratePlan(false)}
-                className="mt-4 px-5 py-2.5 rounded-xl bg-[#14532D] text-white text-xs font-bold hover:bg-[#0f3e22]"
+                onClick={() => handleGeneratePlan()}
+                disabled={isGenerating}
+                className="mt-4 px-5 py-2.5 rounded-xl bg-[#14532D] text-white text-xs font-bold hover:bg-[#0f3e22] disabled:opacity-50 cursor-pointer"
               >
-                Create Meal Plan
+                {isGenerating ? 'Checking...' : 'Create Meal Plan'}
               </button>
             </div>
           )}

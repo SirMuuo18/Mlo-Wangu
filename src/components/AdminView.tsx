@@ -1,12 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { useApp } from '../context/AppContext';
 import { Shield, CheckCircle2, XCircle, Play, RefreshCw, Edit3, Save, Coins, Database, Lock } from 'lucide-react';
 import { api } from '../services/api';
 import { FoodItem } from '../types';
 
+// Self-contained: this view is only ever reached through the /?admin=true
+// entry point after AdminGate has independently verified server-side admin
+// authorization. It intentionally does not depend on the consumer AppProvider
+// so the admin surface stays fully decoupled from the consumer app tree.
 export const AdminView: React.FC = () => {
-  const { foodItems, refreshAll } = useApp();
-
+  const [foodItems, setFoodItems] = useState<FoodItem[]>([]);
   const [stats, setStats] = useState<any>(null);
   const [auditResults, setAuditResults] = useState<any>(null);
   const [isRunningAudit, setIsRunningAudit] = useState(false);
@@ -16,6 +18,7 @@ export const AdminView: React.FC = () => {
 
   useEffect(() => {
     loadStats();
+    loadFoodItems();
   }, []);
 
   const loadStats = async () => {
@@ -24,6 +27,15 @@ export const AdminView: React.FC = () => {
       setStats(res);
     } catch (err) {
       console.error('Error loading stats:', err);
+    }
+  };
+
+  const loadFoodItems = async () => {
+    try {
+      const res = await api.getFoodItems();
+      setFoodItems(res.items);
+    } catch (err) {
+      console.error('Error loading food items:', err);
     }
   };
 
@@ -43,7 +55,7 @@ export const AdminView: React.FC = () => {
     try {
       await api.updateFoodPrice(itemId, editPrice, editRegion);
       setEditingItemId(null);
-      await refreshAll();
+      await loadFoodItems();
       await loadStats();
     } catch (err) {
       console.error('Error updating price:', err);

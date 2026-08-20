@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { Lock, Unlock, Bell, Shield, ShieldCheck, User, X, Check, Droplet, Utensils, Bot } from 'lucide-react';
+import { Lock, Unlock, Bell, ShieldCheck, User, X, Check, Droplet, Utensils, Bot } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
   const {
@@ -237,17 +237,6 @@ export const Navbar: React.FC = () => {
                   >
                     <ShieldCheck className="w-4 h-4 text-[#14532D]" />
                     Mlo Wangu Premium Membership
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setActiveTab('admin');
-                      setIsProfileOpen(false);
-                    }}
-                    className="w-full text-left px-3 py-2 text-xs font-semibold text-[#17201A] hover:bg-[#FAF8F2] rounded-xl flex items-center gap-2"
-                  >
-                    <Shield className="w-4 h-4 text-[#14532D]" />
-                    Admin & Security Audit
                   </button>
                 </div>
               </div>
