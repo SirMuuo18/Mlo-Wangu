@@ -1,4 +1,4 @@
-import { FoodItem, Meal } from '../types';
+import { FoodItem, Meal } from '../types.js';
 
 export const KENYAN_FOOD_ITEMS: FoodItem[] = [
   // CARBOHYDRATES

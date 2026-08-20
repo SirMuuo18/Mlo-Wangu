@@ -8,12 +8,12 @@ import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
-import { db, generateShoppingItemsFromMealPlan, getMondayOfCurrentWeek, getTodayDate, getCurrentYearMonth } from './server/db';
-import { secureDb, paymentsDb } from './server/secure-db';
-import { getDarajaConfig, normalizeKenyanPhone, maskPhone, initiateStkPush, parseDarajaCallback, PREMIUM_PRICING, MEAL_PLAN_GENERATION_PRICE_KSH } from './server/mpesa';
-import { KENYAN_MEALS, KENYAN_FOOD_ITEMS } from './src/data/kenyanFoodData';
-import { ExpenseCategory, Meal } from './src/types';
-import { requireAuth, optionalAuth, setAuthCookies, clearAuthCookies } from './server/auth-middleware';
+import { db, generateShoppingItemsFromMealPlan, getMondayOfCurrentWeek, getTodayDate, getCurrentYearMonth } from './server/db.js';
+import { secureDb, paymentsDb } from './server/secure-db.js';
+import { getDarajaConfig, normalizeKenyanPhone, maskPhone, initiateStkPush, parseDarajaCallback, PREMIUM_PRICING, MEAL_PLAN_GENERATION_PRICE_KSH } from './server/mpesa.js';
+import { KENYAN_MEALS, KENYAN_FOOD_ITEMS } from './src/data/kenyanFoodData.js';
+import { ExpenseCategory, Meal } from './src/types.js';
+import { requireAuth, optionalAuth, setAuthCookies, clearAuthCookies } from './server/auth-middleware.js';
 
 dotenv.config();
 

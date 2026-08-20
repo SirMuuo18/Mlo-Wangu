@@ -13,11 +13,11 @@
 // there is no JSON/demo fallback for it at all, regardless of USE_JSON_DB.
 
 import crypto from 'crypto';
-import { db, getCurrentYearMonth, getTodayDate } from './db';
-import { SupabaseDatabaseAdapter } from './db-supabase';
-import type { UserProfile, Household, HouseholdMember, WaterTargetConfig, WaterLog, UserBudget, Expense } from '../src/types';
-import type { PaymentStatus, PaymentPlanType } from './db-adapter';
-import { MEAL_PLAN_GENERATION_ENTITLEMENT_VALID_MS } from './mpesa';
+import { db, getCurrentYearMonth, getTodayDate } from './db.js';
+import { SupabaseDatabaseAdapter } from './db-supabase.js';
+import type { UserProfile, Household, HouseholdMember, WaterTargetConfig, WaterLog, UserBudget, Expense } from '../src/types.js';
+import type { PaymentStatus, PaymentPlanType } from './db-adapter.js';
+import { MEAL_PLAN_GENERATION_ENTITLEMENT_VALID_MS } from './mpesa.js';
 
 function useJson(): boolean {
   return process.env.USE_JSON_DB === 'true';

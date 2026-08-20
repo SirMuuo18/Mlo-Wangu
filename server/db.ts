@@ -15,8 +15,8 @@ import {
   Subscription,
   NotificationItem,
   OverspendingAnalysis,
-} from '../src/types';
-import { KENYAN_FOOD_ITEMS, KENYAN_MEALS, SAMPLE_HOUSEHOLD_MEMBERS } from '../src/data/kenyanFoodData';
+} from '../src/types.js';
+import { KENYAN_FOOD_ITEMS, KENYAN_MEALS, SAMPLE_HOUSEHOLD_MEMBERS } from '../src/data/kenyanFoodData.js';
 
 const DB_FILE = path.join(process.cwd(), 'data', 'mlo_database.json');
 
