@@ -5,7 +5,13 @@ import crypto from 'crypto';
 import dotenv from 'dotenv';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { createServer as createViteServer } from 'vite';
+// 'vite' is imported lazily (inside startApp(), dev-mode only — see below)
+// rather than at top level. It's a heavy, dev-only dependency (pulls in
+// Rollup, including platform-native optional binaries) that must never load
+// in a deployed environment: eagerly importing it here crashed Vercel's
+// serverless function at module-load time even though the code path itself
+// is gated behind NODE_ENV, because ES module imports execute regardless of
+// whether the importing branch ever runs.
 import { GoogleGenAI } from '@google/genai';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { db, generateShoppingItemsFromMealPlan, getMondayOfCurrentWeek, getTodayDate, getCurrentYearMonth } from './server/db.js';
@@ -1735,6 +1741,7 @@ async function startApp() {
   console.log('─────────────────────────────────────────────────────────');
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
