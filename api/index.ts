@@ -11,7 +11,7 @@
 // crash. Revert to a plain re-export once resolved.
 export default async function handler(req: any, res: any) {
   try {
-    const mod = await import('../server');
+    const mod = await import('../server.js');
     const app = mod.default as any;
     return app(req, res);
   } catch (err: any) {
