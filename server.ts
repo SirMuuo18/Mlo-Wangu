@@ -1755,4 +1755,18 @@ async function startApp() {
   });
 }
 
-startApp();
+// Vercel's Node runtime imports `app` as a request handler and invokes it
+// per-request — it never runs this file as a long-lived process, so
+// app.listen() (and the dev/prod static-serving setup above, which only
+// matters for a real persistent server) must not run there. Static assets
+// are served directly by Vercel's own build output for the Vite frontend;
+// only /api/* is routed to this function (see api/[...path].ts), so the
+// only thing this function needs is the routes already registered above
+// plus the error handler.
+if (!process.env.VERCEL) {
+  startApp();
+} else {
+  app.use(errorHandler);
+}
+
+export default app;
