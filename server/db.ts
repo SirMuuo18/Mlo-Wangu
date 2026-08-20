@@ -18,7 +18,14 @@ import {
 } from '../src/types.js';
 import { KENYAN_FOOD_ITEMS, KENYAN_MEALS, SAMPLE_HOUSEHOLD_MEMBERS } from '../src/data/kenyanFoodData.js';
 
-const DB_FILE = path.join(process.cwd(), 'data', 'mlo_database.json');
+// Vercel's function filesystem is read-only except /tmp — persisting there
+// still doesn't survive across cold starts/invocations, but avoids a hard
+// crash on every request. This JSON store only ever covers meal plans,
+// shopping lists, and notifications (see server/secure-db.ts's header
+// comment); privacy-critical data always goes through Supabase regardless.
+const DB_FILE = process.env.VERCEL
+  ? path.join('/tmp', 'mlo_database.json')
+  : path.join(process.cwd(), 'data', 'mlo_database.json');
 
 // Interface for persistent store
 export interface DatabaseSchema {
@@ -282,9 +289,16 @@ class DatabaseManager {
   }
 
   private ensureDataDirectory() {
-    const dir = path.dirname(DB_FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    try {
+      const dir = path.dirname(DB_FILE);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+    } catch (err) {
+      // Read-only filesystem (e.g. an unwritable path) — degrade to
+      // in-memory-only for this process rather than crashing module load;
+      // saveData()'s own try/catch already tolerates this on every write.
+      console.error('Could not create data directory, continuing in-memory only:', err);
     }
   }
 
