@@ -9,6 +9,10 @@
 // TEMPORARY: wrapped in a try/catch that surfaces the actual error instead
 // of Vercel's generic FUNCTION_INVOCATION_FAILED, to diagnose the current
 // crash. Revert to a plain re-export once resolved.
+// cache-bust: v2 — server.ts's imports were fixed but this entry file
+// itself was untouched in that commit; forcing recompilation in case
+// Vercel's function bundler caches per-entry-file rather than following
+// the full dependency graph for cache invalidation.
 export default async function handler(req: any, res: any) {
   try {
     const mod = await import('../server.js');
