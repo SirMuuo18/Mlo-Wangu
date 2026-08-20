@@ -4,8 +4,21 @@
 // 404'd identically to this one importing server.ts, while a plain-named
 // function worked fine) — so vercel.json explicitly rewrites every /api/*
 // request to this literal function instead of relying on filesystem
-// catch-all routing. Vercel's Node runtime treats a default-exported
-// (req, res) => void-shaped function as a request handler, which an
-// Express app satisfies directly. All the actual routes live in
-// ../server.ts.
-export { default } from '../server';
+// catch-all routing.
+//
+// TEMPORARY: wrapped in a try/catch that surfaces the actual error instead
+// of Vercel's generic FUNCTION_INVOCATION_FAILED, to diagnose the current
+// crash. Revert to a plain re-export once resolved.
+export default async function handler(req: any, res: any) {
+  try {
+    const mod = await import('../server');
+    const app = mod.default as any;
+    return app(req, res);
+  } catch (err: any) {
+    res.status(500).json({
+      debug: true,
+      message: err?.message || String(err),
+      stack: err?.stack ? String(err.stack).split('\n').slice(0, 10) : undefined,
+    });
+  }
+}
