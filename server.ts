@@ -390,20 +390,24 @@ app.post('/api/auth/request-password-reset', passwordResetLimiter, async (req: R
 });
 
 // Complete a password reset. The frontend lands here with the short-lived
-// access/refresh token pair Supabase issued from the emailed recovery link
-// (delivered via URL fragment, never persisted — see AuthView's hash
-// handling). We verify that token is genuine before touching anything, then
-// use the service-role admin API (not the token's own session) to set the
-// new password — the same trusted-server pattern used everywhere else in
-// this file. A verified recovery token is itself a valid session, so on
-// success we sign the user in immediately via the normal HttpOnly cookies,
-// exactly like register/login. The token is used once, in this one request,
-// and never logged or stored.
+// access token Supabase issued from the emailed recovery link (delivered via
+// URL fragment, never persisted — see AuthView's hash handling). We verify
+// that token is genuine before touching anything, then use the service-role
+// admin API (not the token's own session) to set the new password — the same
+// trusted-server pattern used everywhere else in this file.
+//
+// The recovery token itself CANNOT be reused as the new session: changing a
+// user's password revokes their existing sessions as a side effect (verified
+// directly — a getUser() call with the same recovery token fails immediately
+// after the updateUserById() that changed the password), so setting cookies
+// from it would silently sign the user into an already-dead session. Instead
+// we sign in fresh with the password we just set, exactly like /api/auth/login.
+// The recovery token is used once, in this one request, and never logged or stored.
 app.post('/api/auth/reset-password', passwordResetLimiter, async (req: Request, res: Response) => {
   if (USE_JSON_DB) {
     return res.status(503).json({ error: 'Password reset requires Supabase. Set USE_JSON_DB=false.' });
   }
-  const { accessToken, refreshToken, password } = req.body as { accessToken?: string; refreshToken?: string; password?: string };
+  const { accessToken, password } = req.body as { accessToken?: string; password?: string };
   if (!accessToken || typeof accessToken !== 'string' || !password || typeof password !== 'string') {
     return res.status(400).json({ error: 'Reset link is invalid or expired. Please request a new one.' });
   }
@@ -422,7 +426,7 @@ app.post('/api/auth/reset-password', passwordResetLimiter, async (req: Request, 
     global: { headers: { Authorization: `Bearer ${accessToken}` } },
   });
   const { data: userData, error: userErr } = await scoped.auth.getUser(accessToken);
-  if (userErr || !userData?.user) {
+  if (userErr || !userData?.user || !userData.user.email) {
     return res.status(401).json({ error: 'Reset link is invalid or expired. Please request a new one.' });
   }
 
@@ -435,10 +439,19 @@ app.post('/api/auth/reset-password', passwordResetLimiter, async (req: Request, 
     return res.status(400).json({ error: 'Could not reset password. Please request a new reset link.' });
   }
 
-  setAuthCookies(res, accessToken, refreshToken ?? '');
+  const { data: signInData, error: signInErr } = await admin.auth.signInWithPassword({
+    email: userData.user.email, password,
+  });
+  if (signInErr || !signInData?.session) {
+    // Password was changed successfully — only the auto-sign-in step failed.
+    console.error('[auth/reset-password] post-reset sign-in failed:', signInErr?.message);
+    return res.json({ message: 'Password reset successfully. Please sign in.', user: null });
+  }
+
+  setAuthCookies(res, signInData.session.access_token, signInData.session.refresh_token ?? '');
   res.json({
     message: 'Password reset successfully. You are now signed in.',
-    user: { id: userData.user.id, email: userData.user.email, name: userData.user.user_metadata?.name },
+    user: { id: signInData.user.id, email: signInData.user.email, name: signInData.user.user_metadata?.name },
   });
 });
 

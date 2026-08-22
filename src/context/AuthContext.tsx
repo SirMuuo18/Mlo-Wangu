@@ -14,7 +14,9 @@ interface AuthContextType {
   register: (email: string, password: string, name: string) => Promise<void>;
   logout: () => Promise<void>;
   requestPasswordReset: (email: string) => Promise<void>;
-  resetPassword: (accessToken: string, refreshToken: string, password: string) => Promise<void>;
+  // Resolves true if the reset also signed the user in (the common case);
+  // false means the password was changed but the caller must sign in manually.
+  resetPassword: (accessToken: string, password: string) => Promise<boolean>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -82,9 +84,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await apiCall('/api/auth/request-password-reset', { email });
   }, []);
 
-  const resetPassword = useCallback(async (accessToken: string, refreshToken: string, password: string) => {
-    const data = await apiCall('/api/auth/reset-password', { accessToken, refreshToken, password });
+  const resetPassword = useCallback(async (accessToken: string, password: string) => {
+    const data = await apiCall('/api/auth/reset-password', { accessToken, password });
     setUser(data.user ?? null);
+    return !!data.user;
   }, []);
 
   return (

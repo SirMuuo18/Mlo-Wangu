@@ -10,20 +10,19 @@ type AuthMode = 'login' | 'register' | 'forgot' | 'reset';
 // strip the fragment from the address bar so it never lingers in browser
 // history — the tokens themselves live only in component state until the
 // reset request consumes them.
-function readRecoveryTokensFromHash(): { accessToken: string; refreshToken: string } | null {
+function readRecoveryTokensFromHash(): { accessToken: string } | null {
   const hash = window.location.hash;
   if (!hash || !hash.includes('type=recovery')) return null;
   const params = new URLSearchParams(hash.replace(/^#/, ''));
   const accessToken = params.get('access_token');
-  const refreshToken = params.get('refresh_token');
   if (!accessToken) return null;
-  return { accessToken, refreshToken: refreshToken ?? '' };
+  return { accessToken };
 }
 
 export const AuthView: React.FC = () => {
   const { login, register, requestPasswordReset, resetPassword } = useAuth();
   const [mode, setMode] = useState<AuthMode>('login');
-  const [recoveryTokens, setRecoveryTokens] = useState<{ accessToken: string; refreshToken: string } | null>(null);
+  const [recoveryTokens, setRecoveryTokens] = useState<{ accessToken: string } | null>(null);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -79,8 +78,12 @@ export const AuthView: React.FC = () => {
         setSuccessMsg('If an account exists for that email, a password reset link has been sent.');
         switchMode('login');
       } else if (mode === 'reset' && recoveryTokens) {
-        await resetPassword(recoveryTokens.accessToken, recoveryTokens.refreshToken, password);
-        // AuthProvider sets user → App re-renders and shows main content
+        const signedIn = await resetPassword(recoveryTokens.accessToken, password);
+        if (!signedIn) {
+          setSuccessMsg('Password reset successfully. Please sign in.');
+          switchMode('login');
+        }
+        // else: AuthProvider sets user → App re-renders and shows main content
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Something went wrong. Please try again.';
