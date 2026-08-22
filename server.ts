@@ -389,6 +389,59 @@ app.post('/api/auth/request-password-reset', passwordResetLimiter, async (req: R
   res.json(generic);
 });
 
+// Complete a password reset. The frontend lands here with the short-lived
+// access/refresh token pair Supabase issued from the emailed recovery link
+// (delivered via URL fragment, never persisted — see AuthView's hash
+// handling). We verify that token is genuine before touching anything, then
+// use the service-role admin API (not the token's own session) to set the
+// new password — the same trusted-server pattern used everywhere else in
+// this file. A verified recovery token is itself a valid session, so on
+// success we sign the user in immediately via the normal HttpOnly cookies,
+// exactly like register/login. The token is used once, in this one request,
+// and never logged or stored.
+app.post('/api/auth/reset-password', passwordResetLimiter, async (req: Request, res: Response) => {
+  if (USE_JSON_DB) {
+    return res.status(503).json({ error: 'Password reset requires Supabase. Set USE_JSON_DB=false.' });
+  }
+  const { accessToken, refreshToken, password } = req.body as { accessToken?: string; refreshToken?: string; password?: string };
+  if (!accessToken || typeof accessToken !== 'string' || !password || typeof password !== 'string') {
+    return res.status(400).json({ error: 'Reset link is invalid or expired. Please request a new one.' });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  }
+
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return res.status(503).json({ error: 'Auth service not configured' });
+  }
+
+  const scoped = createSupabaseClient(supabaseUrl, supabaseAnonKey, {
+    auth: { persistSession: false },
+    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+  });
+  const { data: userData, error: userErr } = await scoped.auth.getUser(accessToken);
+  if (userErr || !userData?.user) {
+    return res.status(401).json({ error: 'Reset link is invalid or expired. Please request a new one.' });
+  }
+
+  const admin = getSupabaseAdmin();
+  if (!admin) return res.status(503).json({ error: 'Auth service not configured' });
+
+  const { error: updateErr } = await admin.auth.admin.updateUserById(userData.user.id, { password });
+  if (updateErr) {
+    console.error('[auth/reset-password] update failed:', updateErr.message);
+    return res.status(400).json({ error: 'Could not reset password. Please request a new reset link.' });
+  }
+
+  setAuthCookies(res, accessToken, refreshToken ?? '');
+  res.json({
+    message: 'Password reset successfully. You are now signed in.',
+    user: { id: userData.user.id, email: userData.user.email, name: userData.user.user_metadata?.name },
+  });
+});
+
 // Onboarding (non-financial preferences only — no Budget PIN required)
 app.post('/api/onboarding/complete', (req: Request, res: Response) => {
   // Accept but do not fail on missing data — onboarding preferences are best-effort

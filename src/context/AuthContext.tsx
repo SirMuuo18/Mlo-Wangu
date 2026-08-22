@@ -13,6 +13,8 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, name: string) => Promise<void>;
   logout: () => Promise<void>;
+  requestPasswordReset: (email: string) => Promise<void>;
+  resetPassword: (accessToken: string, refreshToken: string, password: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -76,8 +78,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
   }, []);
 
+  const requestPasswordReset = useCallback(async (email: string) => {
+    await apiCall('/api/auth/request-password-reset', { email });
+  }, []);
+
+  const resetPassword = useCallback(async (accessToken: string, refreshToken: string, password: string) => {
+    const data = await apiCall('/api/auth/reset-password', { accessToken, refreshToken, password });
+    setUser(data.user ?? null);
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ user, isLoading, isAuthenticated: !!user, login, register, logout }}>
+    <AuthContext.Provider value={{ user, isLoading, isAuthenticated: !!user, login, register, logout, requestPasswordReset, resetPassword }}>
       {children}
     </AuthContext.Provider>
   );
