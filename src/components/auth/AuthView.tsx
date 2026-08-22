@@ -42,7 +42,7 @@ export const AuthView: React.FC = () => {
         // AuthProvider sets user → App re-renders and shows main content
       } else {
         await register(email.trim(), password, name.trim());
-        setSuccessMsg('Account created! Check your email to verify your address, then sign in.');
+        setSuccessMsg('Account created! You can now sign in.');
         switchMode('login');
       }
     } catch (err: unknown) {

@@ -259,14 +259,21 @@ app.post('/api/auth/register', registerLimiter, async (req: Request, res: Respon
   const supabase = getSupabaseAdmin();
   if (!supabase) return res.status(503).json({ error: 'Auth service not configured' });
 
+  // email_confirm: true — this route is the only way to create an account (no
+  // public Supabase signUp is exposed to the client), already gated behind
+  // registerLimiter and password-length validation, and created with the
+  // service-role key. Leaving new accounts unconfirmed made them permanently
+  // unusable: signInWithPassword correctly refuses an unconfirmed email, but
+  // this app has no verification-link landing page or resend flow anywhere,
+  // so every new user was locked out of their own just-created account.
   const { data, error } = await supabase.auth.admin.createUser({
     email: email.trim().toLowerCase(),
     password,
     user_metadata: { name: (name ?? '').trim() || email.split('@')[0] },
-    email_confirm: false,
+    email_confirm: true,
   });
   if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json({ message: 'Account created. Check your email to verify your address.' });
+  res.status(201).json({ message: 'Account created successfully. You can now sign in.' });
 });
 
 // Login
@@ -291,6 +298,14 @@ app.post('/api/auth/login', loginLimiter, async (req: Request, res: Response) =>
     email: email.trim().toLowerCase(), password,
   });
   if (error || !data?.session) {
+    // Safe diagnostic only: Supabase's error.message here is a short fixed
+    // string ("Invalid login credentials", "Email not confirmed", etc.) —
+    // never the password or a token. The client always gets the same
+    // generic message regardless of cause, so this never leaks account
+    // existence or a more specific reason to the caller.
+    if (error && error.message !== 'Invalid login credentials') {
+      console.error('[auth/login] sign-in failed:', error.message);
+    }
     return res.status(401).json({ error: 'Invalid email or password.' });
   }
 
