@@ -11,6 +11,7 @@ import {
   Expense,
   NotificationItem,
   OverspendingAnalysis,
+  UserBudget,
 } from '../types';
 import { api } from '../services/api';
 import confetti from 'canvas-confetti';
@@ -69,6 +70,7 @@ interface AppContextType {
   lockBudget: () => Promise<void>;
   setupBudgetPin: (pin: string, confirmPin?: string) => Promise<boolean>;
   refreshFinancialData: () => Promise<void>;
+  saveMonthlyIncome: (monthlyIncomeKsh: number, incomeType?: UserBudget['incomeType']) => Promise<void>;
 
   // Public Actions
   logWater: (amountMl: number) => Promise<void>;
@@ -239,6 +241,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // Sets/edits the monthly income for the current budget month. Only
+  // callable while the Budget is unlocked (requireFinancialSession on the
+  // server) — preserves any existing category allocations by fetching the
+  // current budget first rather than overwriting it wholesale.
+  const saveMonthlyIncome = async (monthlyIncomeKsh: number, incomeType?: UserBudget['incomeType']) => {
+    if (!isBudgetUnlocked) return;
+    try {
+      const { budget: current } = await api.getBudget();
+      await api.updateBudget({
+        ...(current || { id: '', userId: '', month: '', categories: [], updatedAt: '' }),
+        monthlyIncomeKsh,
+        incomeType: incomeType || current?.incomeType || 'monthly',
+      });
+      await refreshFinancialData();
+    } catch (err: any) {
+      if (err.budgetLocked) await lockBudget();
+      throw err;
+    }
+  };
+
   // Water Log Handler
   const logWater = async (amountMl: number) => {
     try {
@@ -392,6 +414,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         lockBudget,
         setupBudgetPin,
         refreshFinancialData,
+        saveMonthlyIncome,
         logWater,
         toggleShoppingItem,
         swapMeal,

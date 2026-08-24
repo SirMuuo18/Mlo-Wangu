@@ -20,6 +20,8 @@ import {
   ShoppingBag,
   Users,
   Utensils,
+  Edit3,
+  X,
 } from 'lucide-react';
 import { getFoodImageUrl } from '../utils/foodImages';
 import { calculateIngredientForPortions } from '../utils/ingredientCalculator';
@@ -34,10 +36,29 @@ export const BudgetView: React.FC = () => {
     setIsPinSetupModalOpen,
     deleteExpense,
     household,
+    saveMonthlyIncome,
   } = useApp();
 
   const [activeSubTab, setActiveSubTab] = useState<'overview' | 'estimator' | 'expenses' | 'planner'>('overview');
   const [calcPortions, setCalcPortions] = useState<number>(household?.members?.length || 5);
+  const [isEditingIncome, setIsEditingIncome] = useState(false);
+  const [incomeInput, setIncomeInput] = useState('');
+  const [isSavingIncome, setIsSavingIncome] = useState(false);
+
+  const handleSaveIncome = async () => {
+    const amount = Number(incomeInput);
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    setIsSavingIncome(true);
+    try {
+      await saveMonthlyIncome(Math.round(amount));
+      setIsEditingIncome(false);
+    } catch {
+      // refreshFinancialData/lockBudget inside saveMonthlyIncome already
+      // handles a locked/expired session; nothing extra to do here.
+    } finally {
+      setIsSavingIncome(false);
+    }
+  };
 
   // Key Kenyan market grocery benchmark items for the interactive calculator
   const estimatorItems = [
@@ -199,39 +220,86 @@ export const BudgetView: React.FC = () => {
           {/* Key Metric Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="bg-white p-5 rounded-3xl border border-[#E8E5DD] shadow-xs">
-              <span className="text-[11px] font-bold text-[#66736A] uppercase">Monthly Income</span>
-              <p className="text-2xl font-black text-[#17201A] mt-1 tabular-nums">
-                KSh {(summary?.totalIncomeKsh ?? 30000).toLocaleString()}
-              </p>
-              <span className="text-[10px] text-[#2E7D32] font-semibold mt-1 block">Active Monthly Budget</span>
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-[#66736A] uppercase">Monthly Income</span>
+                {!isEditingIncome && (
+                  <button
+                    onClick={() => { setIncomeInput(String(summary?.totalIncomeKsh || '')); setIsEditingIncome(true); }}
+                    className="p-1 text-[#66736A] hover:text-[#17201A] rounded-lg hover:bg-gray-100 cursor-pointer"
+                    title={summary?.totalIncomeKsh ? 'Edit monthly income' : 'Set monthly income'}
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              {isEditingIncome ? (
+                <div className="mt-1.5 space-y-2">
+                  <input
+                    type="number"
+                    min={0}
+                    step={1000}
+                    autoFocus
+                    placeholder="e.g. 50000"
+                    value={incomeInput}
+                    onChange={(e) => setIncomeInput(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-[#FAF8F2] border border-[#E8E5DD] rounded-lg text-sm font-bold text-[#17201A] focus:outline-none focus:ring-2 focus:ring-[#14532D]/30"
+                  />
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={handleSaveIncome}
+                      disabled={isSavingIncome}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#14532D] text-white text-[10px] font-bold cursor-pointer disabled:opacity-50"
+                    >
+                      <Check className="w-3 h-3" /> {isSavingIncome ? 'Saving…' : 'Save'}
+                    </button>
+                    <button
+                      onClick={() => setIsEditingIncome(false)}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[#E8E5DD] text-[10px] font-bold cursor-pointer"
+                    >
+                      <X className="w-3 h-3" /> Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <p className="text-2xl font-black text-[#17201A] mt-1 tabular-nums">
+                    KSh {(summary?.totalIncomeKsh ?? 0).toLocaleString()}
+                  </p>
+                  <span className="text-[10px] text-[#2E7D32] font-semibold mt-1 block">
+                    {summary?.totalIncomeKsh ? 'Active Monthly Budget' : 'Not set — click to add your salary'}
+                  </span>
+                </>
+              )}
             </div>
 
             <div className="bg-white p-5 rounded-3xl border border-[#E8E5DD] shadow-xs">
               <span className="text-[11px] font-bold text-[#66736A] uppercase">Total Spent</span>
               <p className="text-2xl font-black text-[#17201A] mt-1 tabular-nums">
-                KSh {(summary?.totalSpentKsh ?? 17450).toLocaleString()}
+                KSh {(summary?.totalSpentKsh ?? 0).toLocaleString()}
               </p>
               <span className="text-[10px] text-[#66736A] mt-1 block">
-                {Math.round(((summary?.totalSpentKsh || 0) / (summary?.totalIncomeKsh || 1)) * 100)}% of income used
+                {summary?.totalIncomeKsh ? Math.round(((summary?.totalSpentKsh || 0) / summary.totalIncomeKsh) * 100) : 0}% of income used
               </span>
             </div>
 
             <div className="bg-white p-5 rounded-3xl border border-[#E8E5DD] shadow-xs">
               <span className="text-[11px] font-bold text-[#66736A] uppercase">Remaining Safe Money</span>
               <p className="text-2xl font-black text-[#2E7D32] mt-1 tabular-nums">
-                KSh {(summary?.remainingKsh ?? 12550).toLocaleString()}
+                KSh {(summary?.remainingKsh ?? 0).toLocaleString()}
               </p>
               <span className="text-[10px] text-[#2E7D32] font-semibold mt-1 block">
-                ~KSh {analysis?.dailySafeSpendingKsh || 418} / day left
+                ~KSh {analysis?.dailySafeSpendingKsh || 0} / day left
               </span>
             </div>
 
             <div className="bg-white p-5 rounded-3xl border border-[#E8E5DD] shadow-xs">
               <span className="text-[11px] font-bold text-[#66736A] uppercase">Savings & Goals</span>
               <p className="text-2xl font-black text-[#14532D] mt-1 tabular-nums">
-                KSh 4,300
+                KSh {(summary?.remainingKsh && summary.remainingKsh > 0 ? summary.remainingKsh : 0).toLocaleString()}
               </p>
-              <span className="text-[10px] text-[#14532D] font-bold mt-1 block">14.3% Savings Rate</span>
+              <span className="text-[10px] text-[#14532D] font-bold mt-1 block">
+                {summary?.totalIncomeKsh ? `${summary.savingsRatePercent}% Savings Rate` : 'No income set yet'}
+              </span>
             </div>
           </div>
 

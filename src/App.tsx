@@ -75,6 +75,8 @@ const AuthGate: React.FC = () => {
           preferences: data.preferences,
           allergies: data.allergies,
           memberCount: data.memberCount,
+          hasBudget: data.hasBudget,
+          monthlyIncomeKsh: data.hasBudget ? data.monthlyIncomeKsh : undefined,
         }),
       });
     } catch { /* non-critical */ }

@@ -472,10 +472,40 @@ app.post('/api/auth/reset-password', passwordResetLimiter, async (req: Request, 
   });
 });
 
-// Onboarding (non-financial preferences only — no Budget PIN required)
-app.post('/api/onboarding/complete', (req: Request, res: Response) => {
-  // Accept but do not fail on missing data — onboarding preferences are best-effort
-  // Financial setup (budget, PIN) is handled separately with Budget PIN
+// Onboarding. requireAuth only (no Budget PIN yet — none can exist this
+// early), same trust level as /api/financial-auth/setup-pin. userId is
+// always derived from the verified session, never the request body, so this
+// can only ever write the caller's own first budget row — never another
+// user's. If the user opted to enter an approximate income, it's saved as
+// their initial monthly budget so it's already there (no re-entry) the
+// first time they unlock the Budget tab with their PIN. Existing categories
+// (if a budget row somehow already exists) are preserved, never wiped.
+app.post('/api/onboarding/complete', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { hasBudget, monthlyIncomeKsh } = req.body as { hasBudget?: boolean; monthlyIncomeKsh?: number };
+
+  if (hasBudget && Number.isFinite(monthlyIncomeKsh) && Number(monthlyIncomeKsh) > 0) {
+    try {
+      const month = getCurrentYearMonth();
+      const existing = await secureDb.getBudget(userId, month);
+      await secureDb.saveBudget({
+        id: existing?.id || `bg_${userId}_${month}`,
+        userId,
+        month,
+        monthlyIncomeKsh: Math.min(Math.round(Number(monthlyIncomeKsh)), 100_000_000),
+        incomeType: existing?.incomeType || 'monthly',
+        categories: existing?.categories || [],
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      console.error('[onboarding] failed to save initial income:', err?.message || err);
+      // Non-critical — onboarding still completes even if this fails.
+    }
+  }
+
+  // Household preferences (householdType/preferences/allergies/memberCount)
+  // remain best-effort/not persisted here by existing design — real
+  // household setup happens later via PUT /api/household.
   res.json({ ok: true });
 });
 
