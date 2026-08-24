@@ -641,7 +641,9 @@ export const BudgetView: React.FC = () => {
           <div>
             <h3 className="text-base font-extrabold text-[#17201A]">Kenyan Realistic Salary Planner</h3>
             <p className="text-xs text-[#66736A] mt-0.5">
-              Compare your monthly income against realistic Nairobi/Kenyan household budget benchmarks.
+              {summary?.totalIncomeKsh
+                ? `Suggested split of your KSh ${summary.totalIncomeKsh.toLocaleString()}/mo income, using realistic Nairobi/Kenyan household benchmarks.`
+                : 'Set your monthly income in the Overview tab to see this split calculated against your real salary.'}
             </p>
           </div>
 
@@ -649,21 +651,36 @@ export const BudgetView: React.FC = () => {
             <div className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E8E5DD]">
               <span className="text-xs font-bold text-[#14532D] uppercase">Needs (50-60%)</span>
               <p className="text-xs text-[#66736A] mt-1">Rent, Food (Unga, Sukuma, Meat), Matatu Transport, Electricity & Tokens.</p>
-              <p className="text-sm font-black text-[#17201A] mt-3 tabular-nums">~KSh 18,000 / mo</p>
+              <p className="text-sm font-black text-[#17201A] mt-3 tabular-nums">
+                {summary?.totalIncomeKsh ? `~KSh ${Math.round(summary.totalIncomeKsh * 0.55).toLocaleString()} / mo` : '— set income first'}
+              </p>
             </div>
 
             <div className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E8E5DD]">
               <span className="text-xs font-bold text-[#D97706] uppercase">Wants & Family (20-25%)</span>
               <p className="text-xs text-[#66736A] mt-1">Weekend outings, airtime, clothing, family contributions (Chama/Harambee).</p>
-              <p className="text-sm font-black text-[#17201A] mt-3 tabular-nums">~KSh 6,500 / mo</p>
+              <p className="text-sm font-black text-[#17201A] mt-3 tabular-nums">
+                {summary?.totalIncomeKsh ? `~KSh ${Math.round(summary.totalIncomeKsh * 0.225).toLocaleString()} / mo` : '— set income first'}
+              </p>
             </div>
 
             <div className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E8E5DD]">
               <span className="text-xs font-bold text-[#2E7D32] uppercase">Savings & Emergency (15-20%)</span>
               <p className="text-xs text-[#66736A] mt-1">Sacco deposits, emergency M-Shwari fund, school fees buffer.</p>
-              <p className="text-sm font-black text-[#17201A] mt-3 tabular-nums">~KSh 5,500 / mo</p>
+              <p className="text-sm font-black text-[#17201A] mt-3 tabular-nums">
+                {summary?.totalIncomeKsh ? `~KSh ${Math.round(summary.totalIncomeKsh * 0.175).toLocaleString()} / mo` : '— set income first'}
+              </p>
             </div>
           </div>
+
+          {!summary?.totalIncomeKsh && (
+            <button
+              onClick={() => setActiveSubTab('overview')}
+              className="text-xs font-bold text-[#172554] hover:underline cursor-pointer"
+            >
+              Go to Overview to set your monthly income →
+            </button>
+          )}
         </div>
       )}
     </div>

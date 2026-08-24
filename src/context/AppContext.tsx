@@ -249,8 +249,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!isBudgetUnlocked) return;
     try {
       const { budget: current } = await api.getBudget();
+      const currentMonth = new Date().toISOString().slice(0, 7);
       await api.updateBudget({
-        ...(current || { id: '', userId: '', month: '', categories: [], updatedAt: '' }),
+        ...(current || { id: '', userId: '', month: currentMonth, categories: [], updatedAt: '' }),
         monthlyIncomeKsh,
         incomeType: incomeType || current?.incomeType || 'monthly',
       });
