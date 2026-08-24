@@ -4,6 +4,7 @@
 export interface UserProfile {
   id: string;
   name: string;
+  email?: string | null;
   role: 'user' | 'admin';
   hasBudgetPin: boolean;
   isPremium: boolean;
@@ -100,7 +101,11 @@ export interface PaymentRecord {
 export interface AccessCodeRecord {
   id: string;
   active: boolean;
-  expiresAt: string | null;
+  createdAt: string;
+  // Database-authoritative — always set, always at most 7 days after
+  // createdAt (enforced by the cap_access_code_expiry trigger). Never
+  // trust/accept a client-supplied value for this field.
+  expiresAt: string;
   maxUses: number;
   usedCount: number;
   userId: string | null;

@@ -14,6 +14,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE IF NOT EXISTS profiles (
   id                  UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   name                TEXT NOT NULL DEFAULT '',
+  email               TEXT,  -- mirrored from auth.users.email for admin user search only
   role                TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','admin')),
   has_budget_pin      BOOLEAN NOT NULL DEFAULT false,
   is_premium          BOOLEAN NOT NULL DEFAULT false,
@@ -24,15 +25,17 @@ CREATE TABLE IF NOT EXISTS profiles (
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_profiles_email ON profiles(email);
 
 -- Auto-create profile on signup
 CREATE OR REPLACE FUNCTION handle_new_user()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  INSERT INTO profiles (id, name)
+  INSERT INTO profiles (id, name, email)
   VALUES (
     NEW.id,
-    COALESCE(NEW.raw_user_meta_data->>'name', split_part(NEW.email, '@', 1))
+    COALESCE(NEW.raw_user_meta_data->>'name', split_part(NEW.email, '@', 1)),
+    NEW.email
   );
   RETURN NEW;
 END;
@@ -42,6 +45,22 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION handle_new_user();
+
+-- Keep profiles.email in sync if a user's auth email ever changes.
+CREATE OR REPLACE FUNCTION sync_profile_email()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NEW.email IS DISTINCT FROM OLD.email THEN
+    UPDATE profiles SET email = NEW.email, updated_at = NOW() WHERE id = NEW.id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_email_updated ON auth.users;
+CREATE TRIGGER on_auth_user_email_updated
+  AFTER UPDATE OF email ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION sync_profile_email();
 
 -- Defense-in-depth: the profiles_self_update RLS policy below (USING only,
 -- no WITH CHECK) lets a user UPDATE any column of their own profile row,
@@ -337,7 +356,7 @@ CREATE TABLE IF NOT EXISTS meal_plan_access_codes (
   code_hash    TEXT NOT NULL UNIQUE,
   user_id      UUID REFERENCES profiles(id) ON DELETE CASCADE,
   active       BOOLEAN NOT NULL DEFAULT true,
-  expires_at   TIMESTAMPTZ,
+  expires_at   TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '7 days'),
   max_uses     INTEGER NOT NULL DEFAULT 1 CHECK (max_uses > 0),
   used_count   INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
   description  TEXT,
@@ -345,6 +364,26 @@ CREATE TABLE IF NOT EXISTS meal_plan_access_codes (
 );
 CREATE INDEX IF NOT EXISTS idx_access_codes_hash ON meal_plan_access_codes(code_hash);
 CREATE INDEX IF NOT EXISTS idx_access_codes_user ON meal_plan_access_codes(user_id);
+
+-- Database-authoritative 7-day expiry ceiling: no code (however it's
+-- inserted or updated) can ever end up with expires_at more than 7 days
+-- after created_at, and a NULL expires_at is always filled in to exactly
+-- created_at + 7 days. See migrations/0003_access_code_7day_expiry.sql for
+-- the full rationale.
+CREATE OR REPLACE FUNCTION cap_access_code_expiry()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.expires_at IS NULL OR NEW.expires_at > NEW.created_at + INTERVAL '7 days' THEN
+    NEW.expires_at := NEW.created_at + INTERVAL '7 days';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_cap_access_code_expiry ON meal_plan_access_codes;
+CREATE TRIGGER trg_cap_access_code_expiry
+  BEFORE INSERT OR UPDATE ON meal_plan_access_codes
+  FOR EACH ROW EXECUTE FUNCTION cap_access_code_expiry();
 
 -- One row = one unconsumed right to generate one new weekly meal plan.
 -- Created only by the server: after a verified successful Daraja callback
@@ -370,6 +409,35 @@ CREATE INDEX IF NOT EXISTS idx_entitlements_user ON meal_plan_entitlements(user_
 CREATE INDEX IF NOT EXISTS idx_entitlements_unused ON meal_plan_entitlements(user_id) WHERE used_at IS NULL;
 -- A given payment/access-code redemption backs at most one entitlement.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entitlements_payment_unique ON meal_plan_entitlements(payment_id) WHERE payment_id IS NOT NULL;
+
+-- ─── Support Notes (admin console) ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS support_notes (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  admin_id     UUID NOT NULL REFERENCES profiles(id),
+  issue        TEXT NOT NULL,
+  action_taken TEXT,
+  resolution   TEXT,
+  resolved     BOOLEAN NOT NULL DEFAULT false,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_support_notes_user ON support_notes(user_id);
+CREATE INDEX IF NOT EXISTS idx_support_notes_created ON support_notes(created_at DESC);
+
+-- ─── Admin Audit Log ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_id        UUID NOT NULL REFERENCES profiles(id),
+  action          TEXT NOT NULL,
+  target_user_id  UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  result          TEXT NOT NULL DEFAULT 'success' CHECK (result IN ('success','failure')),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_admin ON admin_audit_log(admin_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_target ON admin_audit_log(target_user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_created ON admin_audit_log(created_at DESC);
 
 -- ─── Notifications ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS notifications (
@@ -507,6 +575,13 @@ ALTER TABLE meal_plan_access_codes ENABLE ROW LEVEL SECURITY;
 -- verified payment callback or access-code redemption, never by a user JWT).
 ALTER TABLE meal_plan_entitlements ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "entitlements_owner_read" ON meal_plan_entitlements FOR SELECT USING (auth.uid() = user_id);
+
+-- support_notes / admin_audit_log — server/service-role only, same pattern
+-- as meal_plan_access_codes: no client policies at all. Never written from a
+-- client-supplied admin_id/action/result — only after the server has
+-- independently verified requireAuth + requireAdmin.
+ALTER TABLE support_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin_audit_log ENABLE ROW LEVEL SECURITY;
 
 -- notifications
 ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;

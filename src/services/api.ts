@@ -227,4 +227,94 @@ export const api = {
       body: JSON.stringify({ priceKsh, region }),
     }),
   runSecurityAudit: () => request<{ auditPassed: boolean; testsCount: number; results: any[]; timestamp: string }>('/api/admin/security-audit'),
+
+  // Admin & Customer Support Console — every call below hits a route gated
+  // by requireAuth + requireAdmin server-side; the frontend enforces nothing.
+  getAdminDashboard: () => request<AdminDashboardStats>('/api/admin/dashboard'),
+  searchAdminUsers: (query: string, page = 1, pageSize = 20) =>
+    request<AdminUserListResult>(`/api/admin/users?query=${encodeURIComponent(query)}&page=${page}&pageSize=${pageSize}`),
+  getAdminUserDetail: (userId: string) => request<AdminUserDetail>(`/api/admin/users/${userId}`),
+  sendAdminPasswordReset: (userId: string) =>
+    request<{ message: string }>(`/api/admin/users/${userId}/send-password-reset`, { method: 'POST' }),
+  getAdminPayments: (status?: string, page = 1, pageSize = 20) =>
+    request<AdminPaymentListResult>(`/api/admin/payments?${status ? `status=${status}&` : ''}page=${page}&pageSize=${pageSize}`),
+  confirmAdminPayment: (paymentId: string) =>
+    request<{ success: boolean; message: string }>(`/api/admin/payments/${paymentId}/confirm`, { method: 'POST' }),
+  getAdminAccessCodes: (status?: string, page = 1, pageSize = 20) =>
+    request<AdminAccessCodeListResult>(`/api/admin/access-codes?${status ? `status=${status}&` : ''}page=${page}&pageSize=${pageSize}`),
+  issueAdminAccessCode: (userId: string, description?: string) =>
+    request<{ success: boolean; accessCodeId: string; code: string; expiresAt: string | null }>('/api/admin/access-codes/issue', {
+      method: 'POST',
+      body: JSON.stringify({ userId, description }),
+    }),
+  cancelAdminAccessCode: (id: string) =>
+    request<{ success: boolean }>(`/api/admin/access-codes/${id}/cancel`, { method: 'POST' }),
+  getSupportNotes: (userId: string) => request<{ notes: SupportNote[] }>(`/api/admin/support-notes/${userId}`),
+  getAllSupportNotes: (resolved?: boolean, page = 1, pageSize = 20) =>
+    request<{ notes: (SupportNote & { userLabel: string })[]; total: number; page: number; pageSize: number }>(
+      `/api/admin/support-notes?${resolved !== undefined ? `resolved=${resolved}&` : ''}page=${page}&pageSize=${pageSize}`
+    ),
+  createSupportNote: (data: { userId: string; issue: string; actionTaken?: string; resolution?: string; resolved?: boolean }) =>
+    request<{ note: SupportNote }>('/api/admin/support-notes', { method: 'POST', body: JSON.stringify(data) }),
+  resolveSupportNote: (noteId: string, resolution?: string) =>
+    request<{ note: SupportNote }>(`/api/admin/support-notes/${noteId}/resolve`, { method: 'POST', body: JSON.stringify({ resolution }) }),
+  getAdminAuditLog: (targetUserId?: string, page = 1, pageSize = 20) =>
+    request<AdminAuditLogResult>(`/api/admin/audit-log?${targetUserId ? `targetUserId=${targetUserId}&` : ''}page=${page}&pageSize=${pageSize}`),
 };
+
+// ── Admin console types ──────────────────────────────────────────────────────
+export interface AdminDashboardStats {
+  totalUsers: number;
+  newUsersLast7Days: number;
+  activeUsersLast30Days: number;
+  premiumUsers: number;
+  usersWithActiveMealPlanAccess: number;
+  pendingPayments: number;
+  confirmedPayments: number;
+  activeAccessCodes: number;
+  expiredAccessCodes: number;
+  recentRegistrations: { id: string; name: string; email: string | null; created_at: string }[];
+  recentPayments: { id: string; user_id: string; amount_ksh: number; plan_type: string; status: string; created_at: string }[];
+  recentSupportActions: { id: string; admin_id: string; action: string; target_user_id: string | null; result: string; created_at: string }[];
+}
+
+export interface AdminUserSummary {
+  id: string; name: string; email: string | null; role: 'user' | 'admin';
+  hasBudgetPin: boolean; createdAt: string; premiumActive: boolean; hasActiveMealPlanAccess: boolean;
+}
+export interface AdminUserListResult { users: AdminUserSummary[]; total: number; page: number; pageSize: number; }
+
+export interface AdminUserDetail {
+  account: { id: string; name: string; email: string | null; role: string; createdAt: string; onboardingComplete: boolean; status: 'active' };
+  mealPlan: {
+    hasActiveMealPlanAccess: boolean;
+    entitlements: { id: string; source: string; createdAt: string; expiresAt: string | null; usedAt: string | null }[];
+    accessCodes: { id: string; status: string; maxUses: number; usedCount: number; expiresAt: string; createdAt: string; description: string | null }[];
+  };
+  payments: { id: string; amountKsh: number; phoneNumber: string; planType: string; status: string; mpesaReceipt: string | null; createdAt: string; verifiedAt: string | null }[];
+  subscription: { planType: string; priceKsh: number; status: string; startDate: string | null; endDate: string | null } | null;
+  household: { id: string; name: string; memberCount: number } | null;
+}
+
+export interface AdminPaymentRow {
+  id: string; userId: string; userEmail: string | null; amountKsh: number; phoneNumber: string;
+  planType: string; status: string; mpesaReceipt: string | null; createdAt: string; verifiedAt: string | null;
+}
+export interface AdminPaymentListResult { payments: AdminPaymentRow[]; total: number; page: number; pageSize: number; }
+
+export interface AdminAccessCodeRow {
+  id: string; userId: string | null; userEmail: string | null; maxUses: number; usedCount: number;
+  expiresAt: string; createdAt: string; description: string | null; status: 'ACTIVE' | 'USED' | 'EXPIRED' | 'CANCELLED';
+}
+export interface AdminAccessCodeListResult { codes: AdminAccessCodeRow[]; total: number; page: number; pageSize: number; }
+
+export interface SupportNote {
+  id: string; user_id: string; admin_id: string; issue: string; action_taken: string | null;
+  resolution: string | null; resolved: boolean; created_at: string; updated_at: string;
+}
+
+export interface AdminAuditLogEntry {
+  id: string; admin_id: string; action: string; target_user_id: string | null;
+  metadata: Record<string, unknown>; result: 'success' | 'failure'; created_at: string;
+}
+export interface AdminAuditLogResult { entries: AdminAuditLogEntry[]; total: number; page: number; pageSize: number; }

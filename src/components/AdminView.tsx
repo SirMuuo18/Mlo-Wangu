@@ -1,13 +1,37 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, CheckCircle2, XCircle, Play, RefreshCw, Edit3, Save, Coins, Database, Lock } from 'lucide-react';
+import { Shield, CheckCircle2, XCircle, Play, RefreshCw, Edit3, Save, Coins, Database, Lock, LayoutDashboard, Users, CreditCard, KeyRound, LifeBuoy, ScrollText, Settings } from 'lucide-react';
 import { api } from '../services/api';
 import { FoodItem } from '../types';
+import { AdminDashboard } from './admin/AdminDashboard';
+import { AdminUsers } from './admin/AdminUsers';
+import { AdminUserDetail } from './admin/AdminUserDetail';
+import { AdminPayments } from './admin/AdminPayments';
+import { AdminAccessCodes } from './admin/AdminAccessCodes';
+import { AdminSupport } from './admin/AdminSupport';
+import { AdminAuditLog } from './admin/AdminAuditLog';
+
+type AdminTab = 'dashboard' | 'users' | 'payments' | 'access-codes' | 'support' | 'audit-log' | 'system';
+
+const TABS: { id: AdminTab; label: string; icon: React.ReactNode }[] = [
+  { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="w-4 h-4" /> },
+  { id: 'users', label: 'Users', icon: <Users className="w-4 h-4" /> },
+  { id: 'payments', label: 'Payments', icon: <CreditCard className="w-4 h-4" /> },
+  { id: 'access-codes', label: 'Access Codes', icon: <KeyRound className="w-4 h-4" /> },
+  { id: 'support', label: 'Support', icon: <LifeBuoy className="w-4 h-4" /> },
+  { id: 'audit-log', label: 'Audit Log', icon: <ScrollText className="w-4 h-4" /> },
+  { id: 'system', label: 'System', icon: <Settings className="w-4 h-4" /> },
+];
 
 // Self-contained: this view is only ever reached through the /?admin=true
 // entry point after AdminGate has independently verified server-side admin
 // authorization. It intentionally does not depend on the consumer AppProvider
 // so the admin surface stays fully decoupled from the consumer app tree.
 export const AdminView: React.FC = () => {
+  const [tab, setTab] = useState<AdminTab>('dashboard');
+  // Cross-tab "jump to this user's profile" — set by Dashboard/Support links,
+  // consumed by the Users tab.
+  const [jumpToUserId, setJumpToUserId] = useState<string | null>(null);
+
   const [foodItems, setFoodItems] = useState<FoodItem[]>([]);
   const [stats, setStats] = useState<any>(null);
   const [auditResults, setAuditResults] = useState<any>(null);
@@ -16,10 +40,17 @@ export const AdminView: React.FC = () => {
   const [editPrice, setEditPrice] = useState<number>(0);
   const [editRegion, setEditRegion] = useState<string>('Nairobi');
 
+  const openUser = (userId: string) => {
+    setJumpToUserId(userId);
+    setTab('users');
+  };
+
   useEffect(() => {
-    loadStats();
-    loadFoodItems();
-  }, []);
+    if (tab === 'system') {
+      loadStats();
+      loadFoodItems();
+    }
+  }, [tab]);
 
   const loadStats = async () => {
     try {
@@ -66,17 +97,51 @@ export const AdminView: React.FC = () => {
     <div className="space-y-6 pb-12 animate-in fade-in duration-200">
       {/* Header Banner */}
       <div className="bg-white p-5 sm:p-6 rounded-3xl border border-[#E8E5DD] shadow-xs">
+        <div className="flex items-center gap-3">
+          <div className="p-3 rounded-2xl bg-[#14532D]/10 text-[#14532D] border border-[#14532D]/20">
+            <Shield className="w-7 h-7" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-extrabold text-[#17201A] tracking-tight">Admin & Customer Support Console</h1>
+            <p className="text-xs text-[#66736A] mt-0.5">
+              Operational dashboard, user support, payment verification, access-code management, and audit trail.
+            </p>
+          </div>
+        </div>
+
+        {/* Tab Navigation */}
+        <div className="flex flex-wrap gap-1.5 mt-5 pt-4 border-t border-[#F1EFE8]">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer ${
+                tab === t.id ? 'bg-[#14532D] text-white shadow-xs' : 'text-[#66736A] hover:bg-[#FAF8F2]'
+              }`}
+            >
+              {t.icon}
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {tab === 'dashboard' && <AdminDashboard onOpenUser={openUser} />}
+      {tab === 'users' && <AdminUsers initialUserId={jumpToUserId} onConsumedInitialUserId={() => setJumpToUserId(null)} />}
+      {tab === 'payments' && <AdminPayments />}
+      {tab === 'access-codes' && <AdminAccessCodes />}
+      {tab === 'support' && <AdminSupport onOpenUser={openUser} />}
+      {tab === 'audit-log' && <AdminAuditLog />}
+
+      {tab === 'system' && (
+      <>
+      <div className="bg-white p-5 sm:p-6 rounded-3xl border border-[#E8E5DD] shadow-xs">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="p-3 rounded-2xl bg-[#14532D]/10 text-[#14532D] border border-[#14532D]/20">
-              <Shield className="w-7 h-7" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-extrabold text-[#17201A] tracking-tight">Admin & Security Audit</h1>
-              <p className="text-xs text-[#66736A] mt-0.5">
-                Market food pricing manager, live database metrics, and cryptographic security verification suite.
-              </p>
-            </div>
+          <div>
+            <h3 className="text-base font-extrabold text-[#17201A]">System & Security Audit</h3>
+            <p className="text-xs text-[#66736A] mt-0.5">
+              Market food pricing manager, live database metrics, and cryptographic security verification suite.
+            </p>
           </div>
 
           <button
@@ -249,6 +314,8 @@ export const AdminView: React.FC = () => {
           </table>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 };

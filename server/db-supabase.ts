@@ -32,7 +32,8 @@ function mapAccessCode(row: Record<string, unknown>): AccessCodeRecord {
   return {
     id: row.id as string,
     active: Boolean(row.active),
-    expiresAt: (row.expires_at as string) ?? null,
+    createdAt: row.created_at as string,
+    expiresAt: row.expires_at as string,
     maxUses: row.max_uses as number,
     usedCount: row.used_count as number,
     userId: (row.user_id as string) ?? null,
@@ -76,6 +77,7 @@ function mapProfile(row: Record<string, unknown>): UserProfile {
   return {
     id: row.id as string,
     name: row.name as string,
+    email: (row.email as string) ?? null,
     role: (row.role as 'user' | 'admin') ?? 'user',
     hasBudgetPin: Boolean(row.has_budget_pin),
     isPremium: Boolean(row.is_premium),

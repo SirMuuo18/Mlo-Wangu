@@ -345,6 +345,85 @@ try {
     assert('Access code responses never echo the raw code or a hash', !respText.includes(goodCode) && !respText.includes(privateCode) && !/[0-9a-f]{64}/.test(respText));
   }
 
+  // ── Access-code 7-day expiry (database-authoritative) ───────────────────
+  console.log('── Access-code 7-day expiry ──');
+  {
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+
+    // #1/#2/#3: a newly issued code has expires_at exactly 7 days after
+    // created_at, and is valid/redeemable before expiry.
+    const freshCode = `FRESH7D-${stamp}`;
+    const seeded = await seedAccessCode(freshCode, { maxUses: 1, usedCount: 0 });
+    const createdAtMs = new Date(seeded.created_at).getTime();
+    const expiresAtMs = new Date(seeded.expires_at).getTime();
+    assert('New code: expires_at is set (database never leaves it null)', !!seeded.expires_at, JSON.stringify(seeded));
+    assert('#2 New code: expires_at is exactly 7 days after created_at', Math.abs((expiresAtMs - createdAtMs) - sevenDaysMs) < 5000, `delta=${expiresAtMs - createdAtMs}ms`);
+
+    await clearUnusedEntitlements(userAId);
+    const freshRedeem = await req('/api/meal-plans/generation/redeem-access-code', { method: 'POST', headers: { Cookie: cookieA }, body: JSON.stringify({ code: freshCode }) });
+    assert('#1/#3 Freshly issued code redeems successfully before expiry', freshRedeem.status === 200 && freshRedeem.body.success === true, JSON.stringify(freshRedeem.body));
+
+    // #4/#5: a code whose 7-day window has elapsed (via a backdated
+    // created_at, so the trigger — not an app-supplied expires_at — is what
+    // makes it expired) can neither be redeemed nor yield a usable
+    // generation. Complements existing #19, which uses an explicit past
+    // expires_at instead of a backdated created_at.
+    const oldCode = `OLD7D-${stamp}`;
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: oldRow, error: oldErr } = await admin.from('meal_plan_access_codes').insert({
+      code_hash: sha256(oldCode.trim().toUpperCase()), active: true, max_uses: 1, used_count: 0,
+      description: 'test code', created_at: eightDaysAgo,
+    }).select('*').single();
+    if (oldErr) throw new Error(`seed backdated code failed: ${oldErr.message}`);
+    assert('Backdated code: trigger-derived expires_at (created_at + 7d) is already in the past', new Date(oldRow.expires_at).getTime() < Date.now(), `expires_at=${oldRow.expires_at}`);
+
+    await clearUnusedEntitlements(userAId);
+    const oldRedeem = await req('/api/meal-plans/generation/redeem-access-code', { method: 'POST', headers: { Cookie: cookieA }, body: JSON.stringify({ code: oldCode }) });
+    assert('#4 Code expired via backdated created_at → rejected', oldRedeem.status === 400 && oldRedeem.body.error === 'Invalid or expired access code.', JSON.stringify(oldRedeem.body));
+    const oldGenRes = await req('/api/meal-plans/generate', { method: 'POST', headers: { Cookie: cookieA }, body: JSON.stringify({}) });
+    assert('#5 Expired code created no entitlement → generation still requires payment (402)', oldGenRes.status === 402 && oldGenRes.body.code === 'PAYMENT_REQUIRED', JSON.stringify(oldGenRes.body));
+
+    // #6: even a direct, privileged service-role insert cannot make a code
+    // outlive 7 days — the trigger clamps any later expires_at back down.
+    // Proves the ceiling is enforced below the application layer, so no
+    // future client-facing admin API could extend it either.
+    const longCode = `LONG30D-${stamp}`;
+    const { data: longRow, error: longErr } = await admin.from('meal_plan_access_codes').insert({
+      code_hash: sha256(longCode.trim().toUpperCase()), active: true, max_uses: 1, used_count: 0,
+      description: 'test code', expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    }).select('*').single();
+    if (longErr) throw new Error(`seed long-expiry code failed: ${longErr.message}`);
+    const longDelta = new Date(longRow.expires_at).getTime() - new Date(longRow.created_at).getTime();
+    assert('#6 A supplied 30-day expiry is clamped down to 7 days by the database', Math.abs(longDelta - sevenDaysMs) < 5000, `delta=${longDelta}ms`);
+
+    // #7: the redeem-access-code endpoint's only input is `code` — injected
+    // expiresAt/createdAt fields in the request body are silently ignored.
+    const tamperCode = `TAMPER-${stamp}`;
+    const tamperSeeded = await seedAccessCode(tamperCode, { maxUses: 1, usedCount: 0 });
+    const tamperRedeem = await req('/api/meal-plans/generation/redeem-access-code', {
+      method: 'POST', headers: { Cookie: cookieB },
+      body: JSON.stringify({ code: tamperCode, expiresAt: '2099-01-01T00:00:00Z', expires_at: '2099-01-01T00:00:00Z', createdAt: '2000-01-01T00:00:00Z', created_at: '2000-01-01T00:00:00Z' }),
+    });
+    assert('#7 Redemption succeeds despite injected expiresAt/createdAt body fields', tamperRedeem.status === 200, JSON.stringify(tamperRedeem.body));
+    const { data: tamperRow } = await admin.from('meal_plan_access_codes').select('created_at, expires_at').eq('id', tamperSeeded.id).single();
+    assert('#7 Injected body fields had zero effect on the stored created_at/expires_at', tamperRow.created_at === tamperSeeded.created_at && tamperRow.expires_at === tamperSeeded.expires_at, JSON.stringify(tamperRow));
+
+    // #9: concurrent redemption of a single-use code stays atomic — exercises
+    // the exact CAS the route relies on (server/db-supabase.ts claimAccessCodeUse).
+    const raceCode = `RACE7D-${stamp}`;
+    const raceSeeded = await seedAccessCode(raceCode, { maxUses: 1, usedCount: 0 });
+    const [u1, u2] = await Promise.all([
+      admin.from('meal_plan_access_codes').update({ used_count: 1 }).eq('id', raceSeeded.id).eq('used_count', 0).select('*'),
+      admin.from('meal_plan_access_codes').update({ used_count: 1 }).eq('id', raceSeeded.id).eq('used_count', 0).select('*'),
+    ]);
+    const raceSuccesses = [u1, u2].filter((r) => !r.error && r.data && r.data.length === 1).length;
+    assert('#9 Exactly one of two concurrent claims on the same single-use code succeeds', raceSuccesses === 1, `successes=${raceSuccesses}`);
+
+    // Never echoes the raw code, a hash, or the timestamps back to the client.
+    const respText2 = JSON.stringify(freshRedeem.body) + JSON.stringify(tamperRedeem.body);
+    assert('Expiry-flow responses never echo the raw code, a hash, or timestamps', !respText2.includes(freshCode) && !respText2.includes(tamperCode) && !/[0-9a-f]{64}/.test(respText2) && !respText2.includes('2099'));
+  }
+
   // ── #21: access-code brute force is rate-limited ────────────────────────
   console.log('── #21 Access-code brute-force rate limiting ──');
   {

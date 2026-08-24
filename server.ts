@@ -16,6 +16,7 @@ import { GoogleGenAI } from '@google/genai';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { db, generateShoppingItemsFromMealPlan, getMondayOfCurrentWeek, getTodayDate, getCurrentYearMonth } from './server/db.js';
 import { secureDb, paymentsDb } from './server/secure-db.js';
+import { adminDb, type AccessCodeStatus } from './server/admin-db.js';
 import { getDarajaConfig, normalizeKenyanPhone, maskPhone, initiateStkPush, parseDarajaCallback, PREMIUM_PRICING, MEAL_PLAN_GENERATION_PRICE_KSH } from './server/mpesa.js';
 import { KENYAN_MEALS, KENYAN_FOOD_ITEMS } from './src/data/kenyanFoodData.js';
 import { ExpenseCategory, Meal } from './src/types.js';
@@ -145,6 +146,17 @@ const stkPushLimiter = rateLimit({
 const accessCodeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10, // same order of magnitude as loginLimiter above
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
+// Admin-triggered password reset support action. Admins are trusted but
+// this still guards against a compromised/careless admin session mass-
+// emailing reset links, or a scripting mistake in the admin UI.
+const adminActionLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 30,
   standardHeaders: true,
   legacyHeaders: false,
   handler: genericLimitHandler,
@@ -360,6 +372,21 @@ app.post('/api/auth/refresh', refreshLimiter, async (req: Request, res: Response
   res.json({ message: 'Session refreshed' });
 });
 
+// Shared by the consumer "forgot password" flow and the admin "send password
+// reset" support action — one recovery-email mechanism, not two. Uses the
+// anon key (Supabase's own resetPasswordForEmail), never the service role,
+// and never touches the account password itself — Supabase emails a secure,
+// short-lived recovery link; nothing here can see or set the password.
+async function sendPasswordResetEmail(email: string): Promise<void> {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+  if (!supabaseUrl || !supabaseAnonKey) throw new Error('Auth service not configured');
+  const supabase = createSupabaseClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: false } });
+  await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+    redirectTo: `${process.env.APP_URL || 'http://localhost:3000'}/reset-password`,
+  });
+}
+
 // Request a password reset email. Always returns the same generic message
 // regardless of whether the email exists — never reveal account existence.
 app.post('/api/auth/request-password-reset', passwordResetLimiter, async (req: Request, res: Response) => {
@@ -370,18 +397,8 @@ app.post('/api/auth/request-password-reset', passwordResetLimiter, async (req: R
   if (!email || typeof email !== 'string') {
     return res.status(400).json({ error: 'Email is required.' });
   }
-
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return res.status(503).json({ error: 'Auth service not configured' });
-  }
-
-  const supabase = createSupabaseClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: false } });
   try {
-    await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
-      redirectTo: `${process.env.APP_URL || 'http://localhost:3000'}/reset-password`,
-    });
+    await sendPasswordResetEmail(email);
   } catch {
     // Swallow — always return the generic response so this endpoint can't be used
     // to enumerate registered emails.
@@ -1673,6 +1690,234 @@ app.put('/api/admin/food-items/:id/price', requireAuth, requireAdmin, (req: Requ
   }
 
   res.json({ foodItem: updated });
+});
+
+// -------------------------------------------------------------
+// ADMIN & CUSTOMER SUPPORT CONSOLE
+// Every route below requires requireAuth + requireAdmin — the SAME
+// server-side check used everywhere else in this file. ?admin=true is a
+// frontend route selector only; it is never read by, or relevant to, any
+// handler in this file. See security-tests-admin-separation.mjs and
+// security-tests-admin-console.mjs for the bypass-attempt regression bank
+// these routes must keep passing (fake headers/query params/body fields
+// must never grant access).
+// -------------------------------------------------------------
+
+app.get('/api/admin/dashboard', requireAuth, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const stats = await adminDb.getDashboardStats();
+    res.json(stats);
+  } catch (err: any) {
+    console.error('[admin/dashboard] failed:', err?.message || err);
+    res.status(503).json({ error: 'Dashboard data temporarily unavailable' });
+  }
+});
+
+app.get('/api/admin/users', requireAuth, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const query = typeof req.query.query === 'string' ? req.query.query : '';
+    const result = await adminDb.searchUsers(query, req.query.page, req.query.pageSize);
+    res.json(result);
+  } catch (err: any) {
+    console.error('[admin/users] search failed:', err?.message || err);
+    res.status(503).json({ error: 'User search temporarily unavailable' });
+  }
+});
+
+app.get('/api/admin/users/:userId', requireAuth, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const detail = await adminDb.getUserDetail(req.params.userId);
+    if (!detail) return res.status(404).json({ error: 'User not found' });
+    res.json(detail);
+  } catch (err: any) {
+    console.error('[admin/users/:id] failed:', err?.message || err);
+    res.status(503).json({ error: 'User detail temporarily unavailable' });
+  }
+});
+
+// Admin never sees, sets, or stores a password — this only ever triggers
+// Supabase's own secure recovery-link email (same mechanism as the consumer
+// "forgot password" flow). The response never reveals more than that an
+// email was sent.
+app.post('/api/admin/users/:userId/send-password-reset', requireAuth, requireAdmin, adminActionLimiter, async (req: Request, res: Response) => {
+  const adminId = getAuthenticatedUserId(req, res);
+  const targetUserId = req.params.userId;
+  if (USE_JSON_DB) return res.status(503).json({ error: 'Not available in dev mode' });
+
+  const user = await secureDb.getUser(targetUserId);
+  if (!user || !user.email) {
+    await adminDb.logAudit({ adminId, action: 'PASSWORD_RESET_REQUESTED', targetUserId, result: 'failure', metadata: { reason: 'user_not_found' } });
+    return res.status(404).json({ error: 'User not found' });
+  }
+  try {
+    await sendPasswordResetEmail(user.email);
+    await adminDb.logAudit({ adminId, action: 'PASSWORD_RESET_REQUESTED', targetUserId, result: 'success' });
+    res.json({ message: 'Password reset email sent.' });
+  } catch (err: any) {
+    console.error('[admin/send-password-reset] failed:', err?.message || err);
+    await adminDb.logAudit({ adminId, action: 'PASSWORD_RESET_REQUESTED', targetUserId, result: 'failure', metadata: { reason: 'send_failed' } });
+    res.status(503).json({ error: 'Unable to send password reset email right now.' });
+  }
+});
+
+app.get('/api/admin/payments', requireAuth, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const result = await adminDb.listPayments(status, req.query.page, req.query.pageSize);
+    res.json(result);
+  } catch (err: any) {
+    console.error('[admin/payments] failed:', err?.message || err);
+    res.status(503).json({ error: 'Payment list temporarily unavailable' });
+  }
+});
+
+// Admin support action: unstick a payment stuck 'pending' (e.g. a Daraja
+// callback that never arrived) after the admin has independently verified
+// the funds via the real M-Pesa/Paybill statement. Reuses the exact same
+// guarded transition + entitlement/subscription creation as the real
+// callback handler — amount, user, and plan type all come from the
+// existing payment row, never from this request's body. Concurrency-safe:
+// a second confirm click (or a real callback arriving afterward) is a no-op.
+app.post('/api/admin/payments/:paymentId/confirm', requireAuth, requireAdmin, adminActionLimiter, async (req: Request, res: Response) => {
+  const adminId = getAuthenticatedUserId(req, res);
+  const { paymentId } = req.params;
+  try {
+    const result = await adminDb.confirmPayment(paymentId);
+    await adminDb.logAudit({
+      adminId, action: 'PAYMENT_CONFIRMED', metadata: { paymentId, reason: result.reason },
+      result: result.ok ? 'success' : 'failure',
+    });
+    if (!result.ok) {
+      const status = result.reason === 'not_found' ? 404 : 409;
+      return res.status(status).json({ error: result.reason === 'not_found' ? 'Payment not found' : 'Payment is not in a pending state' });
+    }
+    res.json({ success: true, message: 'Payment confirmed. Entitlement/subscription issued.' });
+  } catch (err: any) {
+    console.error('[admin/payments/confirm] failed:', err?.message || err);
+    await adminDb.logAudit({ adminId, action: 'PAYMENT_CONFIRMED', metadata: { paymentId }, result: 'failure' });
+    res.status(503).json({ error: 'Unable to confirm payment right now.' });
+  }
+});
+
+app.get('/api/admin/access-codes', requireAuth, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const status = typeof req.query.status === 'string' ? (req.query.status as AccessCodeStatus) : undefined;
+    const result = await adminDb.listAccessCodes(status, req.query.page, req.query.pageSize);
+    res.json(result);
+  } catch (err: any) {
+    console.error('[admin/access-codes] failed:', err?.message || err);
+    res.status(503).json({ error: 'Access code list temporarily unavailable' });
+  }
+});
+
+// Issues a code as a manual support action (e.g. a user paid via Paybill
+// entirely outside the app and the admin has verified it out-of-band). The
+// plaintext code is returned exactly once, in this response, and nowhere
+// else — never logged, never re-readable afterward (only its hash is
+// stored). Automated email delivery of access codes is not wired up in this
+// deployment (no transactional email provider is configured) — see the
+// deployment report; until that exists, the admin must relay this code to
+// the user through another verified channel.
+app.post('/api/admin/access-codes/issue', requireAuth, requireAdmin, adminActionLimiter, async (req: Request, res: Response) => {
+  const adminId = getAuthenticatedUserId(req, res);
+  const { userId, description } = req.body as { userId?: string; description?: string };
+  if (!userId || typeof userId !== 'string') {
+    return res.status(400).json({ error: 'userId is required' });
+  }
+  const user = await secureDb.getUser(userId);
+  if (!user) {
+    await adminDb.logAudit({ adminId, action: 'ACCESS_CODE_ISSUED', targetUserId: userId, result: 'failure', metadata: { reason: 'user_not_found' } });
+    return res.status(404).json({ error: 'User not found' });
+  }
+  try {
+    const issued = await adminDb.issueAccessCode(userId, adminId, description);
+    await adminDb.logAudit({
+      adminId, action: 'ACCESS_CODE_ISSUED', targetUserId: userId,
+      metadata: { accessCodeId: issued.id, expiresAt: issued.expiresAt }, result: 'success',
+    });
+    res.json({ success: true, accessCodeId: issued.id, code: issued.code, expiresAt: issued.expiresAt });
+  } catch (err: any) {
+    console.error('[admin/access-codes/issue] failed:', err?.message || err);
+    await adminDb.logAudit({ adminId, action: 'ACCESS_CODE_ISSUED', targetUserId: userId, result: 'failure' });
+    res.status(503).json({ error: 'Unable to issue access code right now.' });
+  }
+});
+
+app.post('/api/admin/access-codes/:id/cancel', requireAuth, requireAdmin, adminActionLimiter, async (req: Request, res: Response) => {
+  const adminId = getAuthenticatedUserId(req, res);
+  const { id } = req.params;
+  const ok = await adminDb.cancelAccessCode(id);
+  await adminDb.logAudit({ adminId, action: 'ACCESS_CODE_CANCELLED', metadata: { accessCodeId: id }, result: ok ? 'success' : 'failure' });
+  if (!ok) return res.status(404).json({ error: 'Access code not found' });
+  res.json({ success: true });
+});
+
+app.get('/api/admin/support-notes', requireAuth, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const resolvedParam = typeof req.query.resolved === 'string' ? req.query.resolved === 'true' : undefined;
+    const result = await adminDb.listAllSupportNotes(resolvedParam, req.query.page, req.query.pageSize);
+    res.json(result);
+  } catch (err: any) {
+    console.error('[admin/support-notes] list-all failed:', err?.message || err);
+    res.status(503).json({ error: 'Support notes temporarily unavailable' });
+  }
+});
+
+app.get('/api/admin/support-notes/:userId', requireAuth, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const notes = await adminDb.listSupportNotes(req.params.userId);
+    res.json({ notes });
+  } catch (err: any) {
+    console.error('[admin/support-notes] list failed:', err?.message || err);
+    res.status(503).json({ error: 'Support notes temporarily unavailable' });
+  }
+});
+
+app.post('/api/admin/support-notes', requireAuth, requireAdmin, adminActionLimiter, async (req: Request, res: Response) => {
+  const adminId = getAuthenticatedUserId(req, res);
+  const { userId, issue, actionTaken, resolution, resolved } = req.body as {
+    userId?: string; issue?: string; actionTaken?: string; resolution?: string; resolved?: boolean;
+  };
+  if (!userId || typeof userId !== 'string' || !issue || typeof issue !== 'string' || !issue.trim()) {
+    return res.status(400).json({ error: 'userId and issue are required' });
+  }
+  const user = await secureDb.getUser(userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  try {
+    const note = await adminDb.createSupportNote({ userId, adminId, issue, actionTaken, resolution, resolved });
+    await adminDb.logAudit({ adminId, action: 'SUPPORT_NOTE_CREATED', targetUserId: userId, metadata: { noteId: note.id }, result: 'success' });
+    res.status(201).json({ note });
+  } catch (err: any) {
+    console.error('[admin/support-notes] create failed:', err?.message || err);
+    await adminDb.logAudit({ adminId, action: 'SUPPORT_NOTE_CREATED', targetUserId: userId, result: 'failure' });
+    res.status(503).json({ error: 'Unable to save support note right now.' });
+  }
+});
+
+app.post('/api/admin/support-notes/:noteId/resolve', requireAuth, requireAdmin, adminActionLimiter, async (req: Request, res: Response) => {
+  const adminId = getAuthenticatedUserId(req, res);
+  const { noteId } = req.params;
+  const { resolution } = req.body as { resolution?: string };
+  try {
+    const note = await adminDb.resolveSupportNote(noteId, resolution);
+    await adminDb.logAudit({ adminId, action: 'SUPPORT_NOTE_RESOLVED', metadata: { noteId }, result: note ? 'success' : 'failure' });
+    if (!note) return res.status(404).json({ error: 'Support note not found' });
+    res.json({ note });
+  } catch (err: any) {
+    console.error('[admin/support-notes/resolve] failed:', err?.message || err);
+    res.status(503).json({ error: 'Unable to resolve support note right now.' });
+  }
+});
+
+app.get('/api/admin/audit-log', requireAuth, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const targetUserId = typeof req.query.targetUserId === 'string' ? req.query.targetUserId : undefined;
+    const result = await adminDb.listAuditLog(targetUserId, req.query.page, req.query.pageSize);
+    res.json(result);
+  } catch (err: any) {
+    console.error('[admin/audit-log] failed:', err?.message || err);
+    res.status(503).json({ error: 'Audit log temporarily unavailable' });
+  }
 });
 
 // -------------------------------------------------------------
