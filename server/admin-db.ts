@@ -15,6 +15,7 @@ import crypto from 'crypto';
 import { paymentsDb } from './secure-db.js';
 import { sha256 } from './secure-db.js';
 import { PREMIUM_PRICING } from './mpesa.js';
+import { db as jsonDb } from './db.js';
 
 let client: SupabaseClient | null = null;
 function db(): SupabaseClient {
@@ -168,7 +169,7 @@ export const adminDb = {
       { data: payments }, { data: subscription }, { data: entitlements },
       { data: accessCodes }, { data: household },
     ] = await Promise.all([
-      db().from('payments').select('id,amount_ksh,phone_number,plan_type,status,mpesa_receipt,created_at,verified_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(25),
+      db().from('payments').select('id,amount_ksh,phone_number,plan_type,status,payment_method,mpesa_receipt,created_at,verified_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(25),
       db().from('subscriptions').select('id,plan_type,price_ksh,status,start_date,end_date').eq('user_id', userId).order('start_date', { ascending: false }).limit(1).maybeSingle(),
       db().from('meal_plan_entitlements').select('id,source,created_at,expires_at,used_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(10),
       db().from('meal_plan_access_codes').select('id,active,max_uses,used_count,expires_at,created_at,description').eq('user_id', userId).order('created_at', { ascending: false }).limit(10),
@@ -198,7 +199,12 @@ export const adminDb = {
       },
       payments: (payments ?? []).map((p: any) => ({
         id: p.id, amountKsh: p.amount_ksh, phoneNumber: p.phone_number, planType: p.plan_type,
-        status: p.status, mpesaReceipt: p.status === 'success' ? p.mpesa_receipt : null,
+        status: p.status, paymentMethod: p.payment_method,
+        // For till_manual, the user-submitted code IS the thing the admin
+        // needs to see to go verify it — unlike stk_push, where a receipt
+        // only exists post-verification (set by the real Daraja callback),
+        // so hiding it pre-success hid nothing there.
+        mpesaReceipt: (p.status === 'success' || p.payment_method === 'till_manual') ? p.mpesa_receipt : null,
         createdAt: p.created_at, verifiedAt: p.verified_at,
       })),
       subscription: subscription
@@ -222,7 +228,7 @@ export const adminDb = {
 
     let q = db()
       .from('payments')
-      .select('id,user_id,amount_ksh,phone_number,plan_type,status,mpesa_receipt,created_at,verified_at', { count: 'exact' })
+      .select('id,user_id,amount_ksh,phone_number,plan_type,status,payment_method,mpesa_receipt,created_at,verified_at', { count: 'exact' })
       .order('created_at', { ascending: false });
     if (status) q = q.eq('status', status);
 
@@ -238,7 +244,8 @@ export const adminDb = {
     const payments = rows.map((r: any) => ({
       id: r.id, userId: r.user_id, userEmail: emailMap[r.user_id] ?? null,
       amountKsh: r.amount_ksh, phoneNumber: r.phone_number, planType: r.plan_type, status: r.status,
-      mpesaReceipt: r.status === 'success' ? r.mpesa_receipt : null,
+      paymentMethod: r.payment_method,
+      mpesaReceipt: (r.status === 'success' || r.payment_method === 'till_manual') ? r.mpesa_receipt : null,
       createdAt: r.created_at, verifiedAt: r.verified_at,
     }));
     return { payments, total: count ?? 0, page: p, pageSize: ps };
@@ -272,10 +279,29 @@ export const adminDb = {
         planType: payment.planType as 'weekly' | 'monthly',
         priceKsh: payment.amountKsh,
         durationDays: duration,
-        mpesaReceipt: '',
+        mpesaReceipt: payment.mpesaReceipt || '',
         paymentId: payment.id,
       });
     }
+
+    // Access is granted the instant this function returns — there is no
+    // separate bearer "code" to relay for a payment confirmation (that only
+    // applies to the standalone "issue an access code" support action).
+    // This just lets the user know it happened, in-app, without requiring
+    // the admin to message them manually.
+    try {
+      jsonDb.addNotification({
+        userId: payment.userId,
+        type: 'system',
+        title: 'Payment confirmed',
+        message: payment.planType === 'meal_plan_generation'
+          ? `Your KSh ${payment.amountKsh} payment has been confirmed — you can now generate a new meal plan.`
+          : `Your KSh ${payment.amountKsh} Premium payment has been confirmed — Premium is now active.`,
+      });
+    } catch (err: any) {
+      console.error('[admin/payments/confirm] notification failed (non-critical):', err?.message || err);
+    }
+
     return { ok: true };
   },
 

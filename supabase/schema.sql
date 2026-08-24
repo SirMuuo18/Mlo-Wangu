@@ -334,13 +334,21 @@ CREATE TABLE IF NOT EXISTS payments (
   result_desc           TEXT,
   daraja_callback_raw   JSONB,  -- store raw callback for audit
   status                TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','success','failed','cancelled','expired')),
+  -- 'stk_push' = automated Daraja push, verified by the real callback below.
+  -- 'till_manual' = user paid via Till/Buy Goods on their own phone and
+  -- submitted the M-Pesa code back into the app; stays 'pending' until an
+  -- admin manually verifies and confirms it — never auto-verified.
+  payment_method        TEXT NOT NULL DEFAULT 'stk_push' CHECK (payment_method IN ('stk_push', 'till_manual')),
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   verified_at           TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);
 CREATE INDEX IF NOT EXISTS idx_payments_checkout ON payments(checkout_request_id);
+CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(payment_method);
 -- Idempotency: a given Daraja CheckoutRequestID can only ever back one payment row.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_checkout_unique ON payments(checkout_request_id) WHERE checkout_request_id IS NOT NULL;
+-- Also prevents the same M-Pesa code (STK receipt or manually-submitted
+-- Till code) from ever backing two different payment rows.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_receipt ON payments(mpesa_receipt) WHERE mpesa_receipt IS NOT NULL;
 
 -- ─── "Generate New Plan" gate: access codes & entitlements ───────────────────

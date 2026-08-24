@@ -17,7 +17,7 @@ import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { db, generateShoppingItemsFromMealPlan, getMondayOfCurrentWeek, getTodayDate, getCurrentYearMonth } from './server/db.js';
 import { secureDb, paymentsDb } from './server/secure-db.js';
 import { adminDb, type AccessCodeStatus } from './server/admin-db.js';
-import { getDarajaConfig, normalizeKenyanPhone, maskPhone, initiateStkPush, parseDarajaCallback, PREMIUM_PRICING, MEAL_PLAN_GENERATION_PRICE_KSH } from './server/mpesa.js';
+import { getDarajaConfig, normalizeKenyanPhone, maskPhone, initiateStkPush, parseDarajaCallback, PREMIUM_PRICING, MEAL_PLAN_GENERATION_PRICE_KSH, normalizeMpesaReceiptCode } from './server/mpesa.js';
 import { KENYAN_MEALS, KENYAN_FOOD_ITEMS } from './src/data/kenyanFoodData.js';
 import { ExpenseCategory, Meal } from './src/types.js';
 import { requireAuth, optionalAuth, setAuthCookies, clearAuthCookies } from './server/auth-middleware.js';
@@ -146,6 +146,17 @@ const stkPushLimiter = rateLimit({
 const accessCodeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10, // same order of magnitude as loginLimiter above
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
+// Till-code submission never contacts Daraja itself (no OAuth/STK cost),
+// but is still a "claim a payment happened" action worth throttling
+// independently of stkPushLimiter — same order of magnitude.
+const tillSubmitLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 5,
   standardHeaders: true,
   legacyHeaders: false,
   handler: genericLimitHandler,
@@ -1545,6 +1556,67 @@ app.post('/api/payments/mpesa/generation/stk-push', requireAuth, stkPushLimiter,
     await paymentsDb.transitionPayment(payment.id, 'pending', { status: 'failed', resultDesc: 'STK push initiation failed' });
     res.status(502).json({ error: 'Could not reach M-Pesa. Please try again.' });
   }
+});
+
+// Till (Buy Goods) manual-entry payment — a second way to pay alongside STK
+// Push, for both Premium and the meal-plan generation gate. The user pays
+// on their own phone (Lipa na M-Pesa > Buy Goods > this Till number), then
+// submits the M-Pesa code they received. This never contacts Daraja and
+// never auto-verifies — it only ever creates a 'pending' payment; only an
+// admin (via the existing requireAuth+requireAdmin confirm-payment route)
+// can move it to 'success' and trigger entitlement/subscription creation.
+// The consumer can never mark their own payment as successful.
+app.get('/api/payments/mpesa/till-info', requireAuth, (req: Request, res: Response) => {
+  const tillNumber = process.env.MPESA_TILL_NUMBER;
+  if (!tillNumber) return res.status(503).json({ error: 'Till payments are not configured.' });
+  res.json({ tillNumber });
+});
+
+app.post('/api/payments/mpesa/till-submit', requireAuth, tillSubmitLimiter, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { planType } = req.body as { planType?: string };
+
+  if (planType !== 'weekly' && planType !== 'monthly' && planType !== 'meal_plan_generation') {
+    return res.status(400).json({ error: 'planType must be "weekly", "monthly", or "meal_plan_generation".' });
+  }
+  const phone = normalizeKenyanPhone(req.body.phoneNumber);
+  if (!phone) {
+    return res.status(400).json({ error: 'Please provide a valid Kenyan Safaricom M-Pesa phone number (e.g. 0712345678 or 254712345678).' });
+  }
+  const mpesaCode = normalizeMpesaReceiptCode(req.body.mpesaCode);
+  if (!mpesaCode) {
+    return res.status(400).json({ error: 'Please enter a valid M-Pesa transaction code (from your M-Pesa confirmation SMS).' });
+  }
+  if (!process.env.MPESA_TILL_NUMBER) {
+    return res.status(503).json({ error: 'Till payments are not configured.' });
+  }
+
+  // Same "one pending payment at a time" guard as the STK routes — prevents
+  // a flood of submissions from the same user before the first is reviewed.
+  const recentPending = await paymentsDb.getRecentPendingPayment(userId, 2 * 60 * 1000);
+  if (recentPending) {
+    return res.status(429).json({ error: 'A payment is already pending review. Please wait for it to be confirmed before submitting another.', paymentId: recentPending.id });
+  }
+
+  // Server determines the amount — never read from the client.
+  const amountKsh = planType === 'meal_plan_generation'
+    ? MEAL_PLAN_GENERATION_PRICE_KSH
+    : PREMIUM_PRICING[planType as 'weekly' | 'monthly'].priceKsh;
+
+  const payment = await paymentsDb.createPendingTillPayment(userId, { amountKsh, phoneNumber: phone, planType: planType as any, mpesaCode });
+  if (!payment) {
+    // Either the insert failed, or (far more likely) this exact M-Pesa code
+    // was already submitted for a different payment — the unique index is
+    // the actual guard; this is a safe generic message either way.
+    return res.status(409).json({ error: 'This M-Pesa code has already been submitted, or could not be recorded. Please check the code and try again.' });
+  }
+
+  res.json({
+    paymentId: payment.id,
+    status: 'pending',
+    amountKsh,
+    message: 'Submitted for verification. Access will be granted once an admin confirms your payment — you will see it in the app automatically.',
+  });
 });
 
 // Alternative to paying: redeem a server-verified access code for one

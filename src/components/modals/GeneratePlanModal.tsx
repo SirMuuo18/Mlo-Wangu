@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { X, Sparkles, Smartphone, KeyRound, CheckCircle2, ChefHat } from 'lucide-react';
+import { X, Sparkles, Smartphone, KeyRound, CheckCircle2, ChefHat, Store, Clock3 } from 'lucide-react';
 import { api } from '../../services/api';
 
 const POLL_INTERVAL_MS = 2500;
 const POLL_TIMEOUT_MS = 90_000;
 const PRICE_KSH = 50;
 
-type Step = 'intro' | 'phone' | 'stk_pending' | 'payment_failed' | 'payment_success' | 'access_code' | 'generating' | 'generated' | 'generation_failed';
+type Step = 'intro' | 'phone' | 'stk_pending' | 'payment_failed' | 'payment_success' | 'access_code' | 'till' | 'till_submitted' | 'generating' | 'generated' | 'generation_failed';
 
 export const GeneratePlanModal: React.FC = () => {
   const { isGeneratePlanModalOpen, setIsGeneratePlanModalOpen, regenerateMealPlan } = useApp();
@@ -15,6 +15,8 @@ export const GeneratePlanModal: React.FC = () => {
   const [step, setStep] = useState<Step>('intro');
   const [phone, setPhone] = useState('0712345678');
   const [accessCode, setAccessCode] = useState('');
+  const [tillNumber, setTillNumber] = useState<string | null>(null);
+  const [mpesaCode, setMpesaCode] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -24,6 +26,7 @@ export const GeneratePlanModal: React.FC = () => {
     setStep('intro');
     setError('');
     setAccessCode('');
+    setMpesaCode('');
     setIsLoading(false);
   };
 
@@ -94,6 +97,37 @@ export const GeneratePlanModal: React.FC = () => {
     }
   };
 
+  const handleOpenTill = async () => {
+    setError('');
+    setIsLoading(true);
+    try {
+      const { tillNumber: t } = await api.getTillInfo();
+      setTillNumber(t);
+      setStep('till');
+    } catch (err: any) {
+      setError(err.message || 'Till payment is not available right now.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // This never grants access itself — it only submits the code for an
+  // admin to verify. The entitlement only appears once confirmed; there's
+  // nothing to poll here since success isn't determined client-side.
+  const handleSubmitTill = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
+    setError('');
+    try {
+      await api.submitTillPayment('meal_plan_generation', phone, mpesaCode);
+      setStep('till_submitted');
+    } catch (err: any) {
+      setError(err.message || 'Could not submit your payment for verification.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleRedeemCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
@@ -144,13 +178,101 @@ export const GeneratePlanModal: React.FC = () => {
                 Pay KSh {PRICE_KSH} with M-Pesa
               </button>
               <button
+                onClick={handleOpenTill}
+                disabled={isLoading}
+                className="w-full py-3 px-4 bg-[#FAF8F2] hover:bg-[#F1EFE8] text-[#17201A] font-extrabold text-xs rounded-xl transition-all border border-[#E8E5DD] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                <Store className="w-4 h-4" />
+                Pay via M-Pesa Till
+              </button>
+              <button
                 onClick={() => { setError(''); setStep('access_code'); }}
                 className="w-full py-3 px-4 bg-[#FAF8F2] hover:bg-[#F1EFE8] text-[#17201A] font-extrabold text-xs rounded-xl transition-all border border-[#E8E5DD] flex items-center justify-center gap-2 cursor-pointer"
               >
                 <KeyRound className="w-4 h-4" />
                 Enter Access Code
               </button>
+              {error && <p className="text-[11px] text-red-600 font-semibold text-center">{error}</p>}
             </div>
+          </div>
+        )}
+
+        {step === 'till' && (
+          <div>
+            <h3 className="text-lg font-extrabold text-[#17201A] text-center">Pay via M-Pesa Till</h3>
+            <p className="text-xs text-[#66736A] text-center mt-1 mb-4">KSh {PRICE_KSH} for one new weekly meal plan.</p>
+
+            <div className="p-4 bg-[#FAF8F2] rounded-xl border border-[#E8E5DD] mb-4 space-y-1.5">
+              <p className="text-[11px] font-bold text-[#17201A] uppercase">How to pay</p>
+              <ol className="text-xs text-[#66736A] list-decimal list-inside space-y-0.5">
+                <li>Go to M-Pesa &rarr; Lipa na M-Pesa &rarr; Buy Goods and Services</li>
+                <li>Till Number: <strong className="text-[#17201A] tabular-nums">{tillNumber}</strong></li>
+                <li>Amount: <strong className="text-[#17201A] tabular-nums">KSh {PRICE_KSH}</strong></li>
+                <li>Enter your M-Pesa PIN and confirm</li>
+                <li>Enter the code from your M-Pesa confirmation SMS below</li>
+              </ol>
+            </div>
+
+            <form onSubmit={handleSubmitTill} className="space-y-3">
+              <div>
+                <label className="text-xs font-bold text-[#17201A] block mb-1">Phone number you paid from</label>
+                <div className="relative">
+                  <Smartphone className="w-4 h-4 text-[#66736A] absolute left-3 top-3" />
+                  <input
+                    type="tel"
+                    required
+                    placeholder="07XX XXX XXX"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2.5 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#14532D]"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-bold text-[#17201A] block mb-1">M-Pesa Transaction Code</label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-[#66736A] absolute left-3 top-3" />
+                  <input
+                    type="text"
+                    required
+                    autoCapitalize="characters"
+                    placeholder="e.g. QGH7XYZ123"
+                    value={mpesaCode}
+                    onChange={(e) => setMpesaCode(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2.5 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#14532D] uppercase"
+                  />
+                </div>
+              </div>
+              {error && <p className="text-[11px] text-red-600 font-semibold">{error}</p>}
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="w-full py-3 px-4 bg-[#14532D] text-white font-extrabold text-xs rounded-xl hover:bg-[#0f3e22] transition-all cursor-pointer disabled:opacity-50"
+              >
+                {isLoading ? 'Submitting...' : 'Submit for Verification'}
+              </button>
+              <button type="button" onClick={() => setStep('intro')} className="w-full text-[11px] text-[#66736A] hover:text-[#17201A] cursor-pointer">
+                Back
+              </button>
+            </form>
+          </div>
+        )}
+
+        {step === 'till_submitted' && (
+          <div className="text-center py-6 space-y-4">
+            <div className="w-16 h-16 rounded-full bg-amber-50 text-amber-600 border border-amber-200 flex items-center justify-center mx-auto">
+              <Clock3 className="w-8 h-8" />
+            </div>
+            <h3 className="text-xl font-extrabold text-[#17201A]">Submitted for verification</h3>
+            <p className="text-xs text-[#66736A] max-w-xs mx-auto">
+              We'll confirm your payment shortly. Once confirmed, you'll see it in the app automatically — just come back and tap Generate again.
+            </p>
+            <button
+              onClick={close}
+              className="w-full py-3 px-4 bg-[#14532D] text-white font-extrabold text-xs rounded-xl hover:bg-[#0f3e22] cursor-pointer"
+            >
+              Done
+            </button>
           </div>
         )}
 

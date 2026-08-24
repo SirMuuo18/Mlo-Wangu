@@ -113,6 +113,16 @@ export const api = {
       body: JSON.stringify({ code }),
     }),
 
+  // M-Pesa Till (Buy Goods) manual-entry payment — alternative to STK push
+  // for both Premium and the generation gate. Never auto-verified; always
+  // lands as a 'pending' payment awaiting admin confirmation.
+  getTillInfo: () => request<{ tillNumber: string }>('/api/payments/mpesa/till-info'),
+  submitTillPayment: (planType: 'weekly' | 'monthly' | 'meal_plan_generation', phoneNumber: string, mpesaCode: string) =>
+    request<{ paymentId: string; status: string; amountKsh: number; message: string }>('/api/payments/mpesa/till-submit', {
+      method: 'POST',
+      body: JSON.stringify({ planType, phoneNumber, mpesaCode }),
+    }),
+
   // Household
   getHousehold: () => request<{ household: Household }>('/api/household'),
   updateHousehold: (household: Household) =>
@@ -291,14 +301,14 @@ export interface AdminUserDetail {
     entitlements: { id: string; source: string; createdAt: string; expiresAt: string | null; usedAt: string | null }[];
     accessCodes: { id: string; status: string; maxUses: number; usedCount: number; expiresAt: string; createdAt: string; description: string | null }[];
   };
-  payments: { id: string; amountKsh: number; phoneNumber: string; planType: string; status: string; mpesaReceipt: string | null; createdAt: string; verifiedAt: string | null }[];
+  payments: { id: string; amountKsh: number; phoneNumber: string; planType: string; status: string; paymentMethod: 'stk_push' | 'till_manual'; mpesaReceipt: string | null; createdAt: string; verifiedAt: string | null }[];
   subscription: { planType: string; priceKsh: number; status: string; startDate: string | null; endDate: string | null } | null;
   household: { id: string; name: string; memberCount: number } | null;
 }
 
 export interface AdminPaymentRow {
   id: string; userId: string; userEmail: string | null; amountKsh: number; phoneNumber: string;
-  planType: string; status: string; mpesaReceipt: string | null; createdAt: string; verifiedAt: string | null;
+  planType: string; status: string; paymentMethod: 'stk_push' | 'till_manual'; mpesaReceipt: string | null; createdAt: string; verifiedAt: string | null;
 }
 export interface AdminPaymentListResult { payments: AdminPaymentRow[]; total: number; page: number; pageSize: number; }
 

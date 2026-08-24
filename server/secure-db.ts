@@ -304,6 +304,8 @@ export const secureDb = {
 export const paymentsDb = {
   createPendingPayment: (userId: string, data: { amountKsh: number; phoneNumber: string; planType: PaymentPlanType }) =>
     sb().createPendingPayment(userId, data),
+  createPendingTillPayment: (userId: string, data: { amountKsh: number; phoneNumber: string; planType: PaymentPlanType; mpesaCode: string }) =>
+    sb().createPendingTillPayment(userId, data),
   setPaymentCheckoutIds: (paymentId: string, data: { checkoutRequestId: string; merchantRequestId: string }) =>
     sb().setPaymentCheckoutIds(paymentId, data),
   getPaymentById: (paymentId: string) => sb().getPaymentById(paymentId),

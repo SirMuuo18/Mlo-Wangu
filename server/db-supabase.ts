@@ -19,6 +19,7 @@ function mapPayment(row: Record<string, unknown>): PaymentRecord {
     phoneNumber: row.phone_number as string,
     planType: row.plan_type as PaymentRecord['planType'],
     status: row.status as PaymentStatus,
+    paymentMethod: (row.payment_method as PaymentRecord['paymentMethod']) ?? 'stk_push',
     checkoutRequestId: (row.checkout_request_id as string) ?? null,
     merchantRequestId: (row.merchant_request_id as string) ?? null,
     mpesaReceipt: (row.mpesa_receipt as string) ?? null,
@@ -444,8 +445,29 @@ export class SupabaseDatabaseAdapter implements IDatabaseAdapter {
       phone_number: data.phoneNumber,
       plan_type: data.planType,
       status: 'pending',
+      payment_method: 'stk_push',
     }).select('*').single();
     if (error || !row) throw new Error('Failed to create pending payment');
+    return mapPayment(row);
+  }
+
+  async createPendingTillPayment(userId: string, data: { amountKsh: number; phoneNumber: string; planType: PaymentPlanType; mpesaCode: string }): Promise<PaymentRecord | null> {
+    const { data: row, error } = await this.db.from('payments').insert({
+      user_id: userId,
+      amount_ksh: data.amountKsh,
+      phone_number: data.phoneNumber,
+      plan_type: data.planType,
+      status: 'pending',
+      payment_method: 'till_manual',
+      mpesa_receipt: data.mpesaCode,
+    }).select('*').single();
+    if (error) {
+      // Postgres unique_violation on idx_payments_receipt — this code was
+      // already submitted for another payment.
+      if ((error as { code?: string }).code === '23505') return null;
+      throw new Error(`Failed to create Till payment: ${error.message}`);
+    }
+    if (!row) return null;
     return mapPayment(row);
   }
 

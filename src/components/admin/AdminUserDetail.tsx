@@ -220,6 +220,7 @@ export const AdminUserDetail: React.FC<{ userId: string; onBack: () => void }> =
                   <tr className="border-b border-[#E8E5DD] text-[#66736A]">
                     <th className="py-2 px-2 font-bold">Amount</th>
                     <th className="py-2 px-2 font-bold">Plan</th>
+                    <th className="py-2 px-2 font-bold">Method</th>
                     <th className="py-2 px-2 font-bold">Status</th>
                     <th className="py-2 px-2 font-bold">Date</th>
                     <th className="py-2 px-2 font-bold">Reference</th>
@@ -228,12 +229,13 @@ export const AdminUserDetail: React.FC<{ userId: string; onBack: () => void }> =
                 </thead>
                 <tbody className="divide-y divide-[#F1EFE8]">
                   {detail.payments.length === 0 && (
-                    <tr><td colSpan={6} className="py-3 px-2 text-[#66736A]">No payments on record.</td></tr>
+                    <tr><td colSpan={7} className="py-3 px-2 text-[#66736A]">No payments on record.</td></tr>
                   )}
                   {detail.payments.map((p) => (
                     <tr key={p.id}>
                       <td className="py-2 px-2 font-bold">{formatKsh(p.amountKsh)}</td>
                       <td className="py-2 px-2 capitalize">{p.planType.replace(/_/g, ' ')}</td>
+                      <td className="py-2 px-2 text-[10px]">{p.paymentMethod === 'till_manual' ? 'Till' : 'STK Push'}</td>
                       <td className="py-2 px-2"><StatusBadge status={p.status} /></td>
                       <td className="py-2 px-2">{formatDate(p.createdAt)}</td>
                       <td className="py-2 px-2 font-mono text-[10px]">{p.mpesaReceipt || '—'}</td>

@@ -81,6 +81,8 @@ export type PaymentStatus = 'pending' | 'success' | 'failed' | 'cancelled' | 'ex
 // never linked to a subscription row.
 export type PaymentPlanType = 'weekly' | 'monthly' | 'meal_plan_generation';
 
+export type PaymentMethod = 'stk_push' | 'till_manual';
+
 export interface PaymentRecord {
   id: string;
   userId: string;
@@ -89,6 +91,7 @@ export interface PaymentRecord {
   phoneNumber: string;
   planType: PaymentPlanType;
   status: PaymentStatus;
+  paymentMethod: PaymentMethod;
   checkoutRequestId: string | null;
   merchantRequestId: string | null;
   mpesaReceipt: string | null;
@@ -176,6 +179,13 @@ export interface IDatabaseAdapter {
   // ── Payments & Subscriptions ────────────────────────────────────────────
   // Real M-Pesa persistence — Supabase-backed only, no JSON equivalent.
   createPendingPayment(userId: string, data: { amountKsh: number; phoneNumber: string; planType: PaymentPlanType }): Promise<PaymentRecord>;
+  // Till/Buy Goods manual entry — created directly as 'pending' with the
+  // user-submitted receipt code already attached (there is no Daraja
+  // callback for this path); an admin must confirm it before anything is
+  // granted. Returns null (never throws) if the receipt code was already
+  // used by another payment — the unique index on mpesa_receipt is the
+  // actual guarantee, this is just a clean way to surface that to the caller.
+  createPendingTillPayment(userId: string, data: { amountKsh: number; phoneNumber: string; planType: PaymentPlanType; mpesaCode: string }): Promise<PaymentRecord | null>;
   setPaymentCheckoutIds(paymentId: string, data: { checkoutRequestId: string; merchantRequestId: string }): Promise<void>;
   getPaymentById(paymentId: string): Promise<PaymentRecord | null>;
   getPaymentByCheckoutRequestId(checkoutRequestId: string): Promise<PaymentRecord | null>;

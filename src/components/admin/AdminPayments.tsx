@@ -53,6 +53,7 @@ export const AdminPayments: React.FC = () => {
               <th className="py-2.5 px-3 font-bold">User</th>
               <th className="py-2.5 px-3 font-bold">Amount</th>
               <th className="py-2.5 px-3 font-bold">Plan</th>
+              <th className="py-2.5 px-3 font-bold">Method</th>
               <th className="py-2.5 px-3 font-bold">Status</th>
               <th className="py-2.5 px-3 font-bold">Date</th>
               <th className="py-2.5 px-3 font-bold">Reference</th>
@@ -60,12 +61,19 @@ export const AdminPayments: React.FC = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-[#F1EFE8]">
-            {payments.length === 0 && <tr><td colSpan={7} className="py-4 px-3 text-[#66736A]">No payments found.</td></tr>}
+            {payments.length === 0 && <tr><td colSpan={8} className="py-4 px-3 text-[#66736A]">No payments found.</td></tr>}
             {payments.map((p) => (
-              <tr key={p.id} className="hover:bg-[#FAF8F2] transition-colors">
+              <tr key={p.id} className={`hover:bg-[#FAF8F2] transition-colors ${p.paymentMethod === 'till_manual' && p.status === 'pending' ? 'bg-amber-50/50' : ''}`}>
                 <td className="py-2.5 px-3 text-[#66736A]">{p.userEmail || p.userId}</td>
                 <td className="py-2.5 px-3 font-extrabold text-[#17201A]">{formatKsh(p.amountKsh)}</td>
                 <td className="py-2.5 px-3 capitalize">{p.planType.replace(/_/g, ' ')}</td>
+                <td className="py-2.5 px-3">
+                  {p.paymentMethod === 'till_manual' ? (
+                    <span className="text-[10px] font-extrabold text-[#8a6410]">TILL — needs review</span>
+                  ) : (
+                    <span className="text-[10px] text-[#66736A]">STK Push</span>
+                  )}
+                </td>
                 <td className="py-2.5 px-3"><StatusBadge status={p.status} /></td>
                 <td className="py-2.5 px-3 text-[#66736A]">{formatDate(p.createdAt)}</td>
                 <td className="py-2.5 px-3 font-mono text-[10px]">{p.mpesaReceipt || '—'}</td>

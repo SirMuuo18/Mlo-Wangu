@@ -67,6 +67,18 @@ export function maskPhone(phone: string): string {
   return `${phone.slice(0, 6)}***${phone.slice(-2)}`;
 }
 
+// Safaricom M-Pesa transaction/receipt codes are 10 uppercase alphanumeric
+// characters (e.g. "QGH7XYZ123"). This only checks the shape — it does NOT
+// verify the code is real or that the payment actually happened; that's the
+// whole reason a manually-submitted Till code creates a 'pending' payment
+// requiring admin confirmation rather than being trusted outright.
+export function normalizeMpesaReceiptCode(raw: string): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const cleaned = raw.trim().toUpperCase().replace(/\s+/g, '');
+  if (!/^[A-Z0-9]{8,12}$/.test(cleaned)) return null;
+  return cleaned;
+}
+
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
 async function getAccessToken(config: DarajaConfig): Promise<string> {
