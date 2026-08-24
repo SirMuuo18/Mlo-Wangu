@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { X, Sparkles, Smartphone, KeyRound, CheckCircle2, ChefHat, Store, Clock3 } from 'lucide-react';
 import { api } from '../../services/api';
@@ -19,6 +19,15 @@ export const GeneratePlanModal: React.FC = () => {
   const [mpesaCode, setMpesaCode] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+
+  // Prefetch the Till number as soon as the modal opens, so it's already
+  // visible on the intro screen's button instead of only appearing after
+  // an extra click into the Till step.
+  useEffect(() => {
+    if (isGeneratePlanModalOpen && !tillNumber) {
+      api.getTillInfo().then((res) => setTillNumber(res.tillNumber)).catch(() => {});
+    }
+  }, [isGeneratePlanModalOpen]);
 
   if (!isGeneratePlanModalOpen) return null;
 
@@ -99,6 +108,7 @@ export const GeneratePlanModal: React.FC = () => {
 
   const handleOpenTill = async () => {
     setError('');
+    if (tillNumber) { setStep('till'); return; }
     setIsLoading(true);
     try {
       const { tillNumber: t } = await api.getTillInfo();
@@ -183,7 +193,7 @@ export const GeneratePlanModal: React.FC = () => {
                 className="w-full py-3 px-4 bg-[#FAF8F2] hover:bg-[#F1EFE8] text-[#17201A] font-extrabold text-xs rounded-xl transition-all border border-[#E8E5DD] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 <Store className="w-4 h-4" />
-                Pay via M-Pesa Till
+                Pay via M-Pesa Till{tillNumber ? ` — ${tillNumber}` : ''}
               </button>
               <button
                 onClick={() => { setError(''); setStep('access_code'); }}
@@ -242,6 +252,9 @@ export const GeneratePlanModal: React.FC = () => {
                     className="w-full pl-9 pr-3 py-2.5 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#14532D] uppercase"
                   />
                 </div>
+                <p className="text-[10px] text-[#66736A] mt-1">
+                  From your M-Pesa confirmation SMS. This will be sent to an admin for review — access unlocks automatically once confirmed.
+                </p>
               </div>
               {error && <p className="text-[11px] text-red-600 font-semibold">{error}</p>}
               <button
@@ -249,7 +262,7 @@ export const GeneratePlanModal: React.FC = () => {
                 disabled={isLoading}
                 className="w-full py-3 px-4 bg-[#14532D] text-white font-extrabold text-xs rounded-xl hover:bg-[#0f3e22] transition-all cursor-pointer disabled:opacity-50"
               >
-                {isLoading ? 'Submitting...' : 'Submit for Verification'}
+                {isLoading ? 'Submitting...' : 'Submit Code for Admin Review'}
               </button>
               <button type="button" onClick={() => setStep('intro')} className="w-full text-[11px] text-[#66736A] hover:text-[#17201A] cursor-pointer">
                 Back
