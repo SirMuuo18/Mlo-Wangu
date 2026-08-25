@@ -17,7 +17,7 @@ import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { db, generateShoppingItemsFromMealPlan, getMondayOfCurrentWeek, getTodayDate, getCurrentYearMonth } from './server/db.js';
 import { secureDb, paymentsDb } from './server/secure-db.js';
 import { adminDb, type AccessCodeStatus } from './server/admin-db.js';
-import { getDarajaConfig, normalizeKenyanPhone, maskPhone, initiateStkPush, parseDarajaCallback, PREMIUM_PRICING, MEAL_PLAN_GENERATION_PRICE_KSH, normalizeMpesaReceiptCode } from './server/mpesa.js';
+import { getDarajaConfig, normalizeKenyanPhone, maskPhone, initiateStkPush, parseDarajaCallback, PREMIUM_PRICING, MEAL_PLAN_GENERATION_PRICE_KSH, normalizeMpesaReceiptCode, extractMpesaCodeFromMessage } from './server/mpesa.js';
 import { KENYAN_MEALS, KENYAN_FOOD_ITEMS } from './src/data/kenyanFoodData.js';
 import { ExpenseCategory, Meal } from './src/types.js';
 import { requireAuth, optionalAuth, setAuthCookies, clearAuthCookies } from './server/auth-middleware.js';
@@ -1595,9 +1595,16 @@ app.post('/api/payments/mpesa/till-submit', requireAuth, tillSubmitLimiter, asyn
   if (!phone) {
     return res.status(400).json({ error: 'Please provide a valid Kenyan Safaricom M-Pesa phone number (e.g. 0712345678 or 254712345678).' });
   }
-  const mpesaCode = normalizeMpesaReceiptCode(req.body.mpesaCode);
-  if (!mpesaCode) {
-    return res.status(400).json({ error: 'Please enter a valid M-Pesa transaction code (from your M-Pesa confirmation SMS).' });
+  // Customer pastes the FULL M-Pesa confirmation SMS, not just the short
+  // code — the code is extracted from it server-side (never trust a
+  // client-parsed code), and the raw message is kept alongside it so an
+  // admin reviewing the submission has the full context Safaricom sent,
+  // not just the isolated code. rawMessage also still accepts a bare code
+  // on its own (normalizeMpesaReceiptCode) for a client that only sends that.
+  const rawMessage = typeof req.body.mpesaMessage === 'string' ? req.body.mpesaMessage.trim().slice(0, 1000) : '';
+  const mpesaCode = extractMpesaCodeFromMessage(rawMessage) || normalizeMpesaReceiptCode(rawMessage);
+  if (!rawMessage || !mpesaCode) {
+    return res.status(400).json({ error: 'Please paste the full M-Pesa confirmation message you received — we could not find a valid transaction code in it.' });
   }
   if (!process.env.MPESA_TILL_NUMBER) {
     return res.status(503).json({ error: 'Till payments are not configured.' });
@@ -1615,7 +1622,7 @@ app.post('/api/payments/mpesa/till-submit', requireAuth, tillSubmitLimiter, asyn
     ? MEAL_PLAN_GENERATION_PRICE_KSH
     : PREMIUM_PRICING[planType as 'weekly' | 'monthly'].priceKsh;
 
-  const payment = await paymentsDb.createPendingTillPayment(userId, { amountKsh, phoneNumber: phone, planType: planType as any, mpesaCode });
+  const payment = await paymentsDb.createPendingTillPayment(userId, { amountKsh, phoneNumber: phone, planType: planType as any, mpesaCode, mpesaRawMessage: rawMessage });
   if (!payment) {
     // Either the insert failed, or (far more likely) this exact M-Pesa code
     // was already submitted for a different payment — the unique index is

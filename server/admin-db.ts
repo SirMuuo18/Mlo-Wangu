@@ -170,7 +170,7 @@ export const adminDb = {
       { data: payments }, { data: subscription }, { data: entitlements },
       { data: accessCodes }, { data: household },
     ] = await Promise.all([
-      db().from('payments').select('id,amount_ksh,phone_number,plan_type,status,payment_method,mpesa_receipt,created_at,verified_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(25),
+      db().from('payments').select('id,amount_ksh,phone_number,plan_type,status,payment_method,mpesa_receipt,mpesa_raw_message,created_at,verified_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(25),
       db().from('subscriptions').select('id,plan_type,price_ksh,status,start_date,end_date').eq('user_id', userId).order('start_date', { ascending: false }).limit(1).maybeSingle(),
       db().from('meal_plan_entitlements').select('id,source,created_at,expires_at,used_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(10),
       db().from('meal_plan_access_codes').select('id,active,max_uses,used_count,expires_at,created_at,description').eq('user_id', userId).order('created_at', { ascending: false }).limit(10),
@@ -206,6 +206,10 @@ export const adminDb = {
         // only exists post-verification (set by the real Daraja callback),
         // so hiding it pre-success hid nothing there.
         mpesaReceipt: (p.status === 'success' || p.payment_method === 'till_manual') ? p.mpesa_receipt : null,
+        // Same visibility rule as mpesaReceipt above — the admin needs the
+        // full pasted message to verify a till_manual submission regardless
+        // of its current status.
+        mpesaRawMessage: (p.status === 'success' || p.payment_method === 'till_manual') ? p.mpesa_raw_message : null,
         createdAt: p.created_at, verifiedAt: p.verified_at,
       })),
       subscription: subscription
@@ -236,7 +240,7 @@ export const adminDb = {
 
     let q = db()
       .from('payments')
-      .select('id,user_id,amount_ksh,phone_number,plan_type,status,payment_method,mpesa_receipt,created_at,verified_at', { count: 'exact' })
+      .select('id,user_id,amount_ksh,phone_number,plan_type,status,payment_method,mpesa_receipt,mpesa_raw_message,created_at,verified_at', { count: 'exact' })
       .order('created_at', { ascending: false });
     if (status) q = q.eq('status', status);
 
@@ -254,6 +258,7 @@ export const adminDb = {
       amountKsh: r.amount_ksh, phoneNumber: r.phone_number, planType: r.plan_type, status: r.status,
       paymentMethod: r.payment_method,
       mpesaReceipt: (r.status === 'success' || r.payment_method === 'till_manual') ? r.mpesa_receipt : null,
+      mpesaRawMessage: (r.status === 'success' || r.payment_method === 'till_manual') ? r.mpesa_raw_message : null,
       createdAt: r.created_at, verifiedAt: r.verified_at,
     }));
     return { payments, total: count ?? 0, page: p, pageSize: ps };

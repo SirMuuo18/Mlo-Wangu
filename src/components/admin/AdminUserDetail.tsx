@@ -238,7 +238,10 @@ export const AdminUserDetail: React.FC<{ userId: string; onBack: () => void }> =
                       <td className="py-2 px-2 text-[10px]">{p.paymentMethod === 'till_manual' ? 'Till' : 'STK Push'}</td>
                       <td className="py-2 px-2"><StatusBadge status={p.status} /></td>
                       <td className="py-2 px-2">{formatDate(p.createdAt)}</td>
-                      <td className="py-2 px-2 font-mono text-[10px]">{p.mpesaReceipt || '—'}</td>
+                      <td className="py-2 px-2 font-mono text-[10px]">
+                        {p.mpesaReceipt || '—'}
+                        {p.mpesaRawMessage && <span className="text-[#66736A] ml-1" title={p.mpesaRawMessage}>(full SMS ⓘ)</span>}
+                      </td>
                       <td className="py-2 px-2 text-right">
                         {p.status === 'pending' && (
                           <button onClick={() => handleConfirmPayment(p.id)} className="px-2.5 py-1 rounded-lg bg-[#14532D] text-white text-[10px] font-bold cursor-pointer">

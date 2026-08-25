@@ -16,7 +16,7 @@ export const GeneratePlanModal: React.FC = () => {
   const [phone, setPhone] = useState('0712345678');
   const [accessCode, setAccessCode] = useState('');
   const [tillNumber, setTillNumber] = useState<string | null>(null);
-  const [mpesaCode, setMpesaCode] = useState('');
+  const [mpesaMessage, setMpesaMessage] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -35,7 +35,7 @@ export const GeneratePlanModal: React.FC = () => {
     setStep('intro');
     setError('');
     setAccessCode('');
-    setMpesaCode('');
+    setMpesaMessage('');
     setIsLoading(false);
   };
 
@@ -152,7 +152,7 @@ export const GeneratePlanModal: React.FC = () => {
     setIsLoading(true);
     setError('');
     try {
-      const res = await api.submitTillPayment('meal_plan_generation', phone, mpesaCode);
+      const res = await api.submitTillPayment('meal_plan_generation', phone, mpesaMessage);
       setStep('till_submitted');
       pollPaymentStatus(res.paymentId, { tillGate: true });
     } catch (err: any) {
@@ -263,21 +263,20 @@ export const GeneratePlanModal: React.FC = () => {
                 </div>
               </div>
               <div>
-                <label className="text-xs font-bold text-[#17201A] block mb-1">M-Pesa Transaction Code</label>
+                <label className="text-xs font-bold text-[#17201A] block mb-1">M-Pesa Confirmation Message</label>
                 <div className="relative">
                   <KeyRound className="w-4 h-4 text-[#66736A] absolute left-3 top-3" />
-                  <input
-                    type="text"
+                  <textarea
                     required
-                    autoCapitalize="characters"
-                    placeholder="e.g. QGH7XYZ123"
-                    value={mpesaCode}
-                    onChange={(e) => setMpesaCode(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2.5 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#14532D] uppercase"
+                    rows={3}
+                    placeholder="Paste the full SMS, e.g. QGH7XYZ123 Confirmed. Ksh50.00 paid to MLO WANGU..."
+                    value={mpesaMessage}
+                    onChange={(e) => setMpesaMessage(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2.5 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#14532D] resize-none"
                   />
                 </div>
                 <p className="text-[10px] text-[#66736A] mt-1">
-                  From your M-Pesa confirmation SMS. This will be sent to an admin for review — access unlocks automatically once confirmed.
+                  Paste the whole confirmation SMS you received — we'll find the transaction code in it. This goes to an admin for review; access unlocks automatically once confirmed.
                 </p>
               </div>
               {error && <p className="text-[11px] text-red-600 font-semibold">{error}</p>}

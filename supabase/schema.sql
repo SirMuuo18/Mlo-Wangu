@@ -347,7 +347,11 @@ CREATE TABLE IF NOT EXISTS payments (
   -- Who verified/rejected a manually-submitted payment, and why (rejection
   -- only). NULL for STK-push payments, verified by the real Daraja callback.
   verified_by           UUID REFERENCES profiles(id),
-  rejection_reason      TEXT
+  rejection_reason      TEXT,
+  -- Full pasted M-Pesa confirmation SMS for a till_manual submission (the
+  -- code itself is still extracted into mpesa_receipt above). NULL for
+  -- stk_push payments. See migrations/0007_mpesa_raw_message.sql.
+  mpesa_raw_message     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);
 CREATE INDEX IF NOT EXISTS idx_payments_checkout ON payments(checkout_request_id);

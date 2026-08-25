@@ -79,6 +79,33 @@ export function normalizeMpesaReceiptCode(raw: string): string | null {
   return cleaned;
 }
 
+// Extracts the transaction code from a pasted full M-Pesa confirmation SMS
+// (e.g. "QGH7XYZ123 Confirmed. Ksh50.00 paid to MLO WANGU. on 25/8/26 at
+// 10:30 AM. New M-PESA balance is Ksh1,234.00."). Real Safaricom messages
+// always lead with the code as the very first token, so that's tried first;
+// as a fallback this scans every token for the first one shaped like a code
+// (8-12 alphanumeric chars) that also contains both a letter and a digit —
+// a real code is always mixed, which safely rules out a pure-digit token
+// elsewhere in the message (a phone number, an amount, an account number)
+// ever being mistaken for it. Returns null if nothing code-shaped is found;
+// never throws.
+export function extractMpesaCodeFromMessage(raw: string): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const tokens = raw.trim().split(/\s+/).map((t) => t.replace(/[.,]+$/, ''));
+  if (tokens.length === 0) return null;
+
+  const isCodeShaped = (t: string) => /^[A-Z0-9]{8,12}$/.test(t) && /[A-Z]/.test(t) && /[0-9]/.test(t);
+
+  const first = tokens[0]?.toUpperCase();
+  if (first && isCodeShaped(first)) return first;
+
+  for (const t of tokens) {
+    const upper = t.toUpperCase();
+    if (isCodeShaped(upper)) return upper;
+  }
+  return null;
+}
+
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
 async function getAccessToken(config: DarajaConfig): Promise<string> {

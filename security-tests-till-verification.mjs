@@ -134,6 +134,43 @@ try {
     }
   }
 
+  // ── TILL-SUBMIT: full pasted M-Pesa SMS, not just the short code ────────
+  // Placed before any other payment is seeded for `userId` — the route
+  // enforces "one pending payment at a time" per user, and later sections
+  // deliberately leave one payment (tillPremium) permanently 'pending', which
+  // would otherwise collide with a real route-level submission here.
+  console.log('── Till-submit: paste the FULL M-Pesa confirmation SMS, code extracted server-side ──');
+  {
+    const realisticCode = 'QGH7XYZ123';
+    const fullMessage = `${realisticCode} Confirmed. Ksh50.00 paid to MLO WANGU. on 25/8/26 at 10:30 AM. New M-PESA balance is Ksh1,234.00. Transaction cost, Ksh0.00.Amount you can transact within the day is 499,000.00. Pay Bill and Buy Goods transactions are free for amounts less than Ksh100.`;
+
+    const noMessage = await req('/api/payments/mpesa/till-submit', {
+      method: 'POST', headers: { Cookie: userCookie },
+      body: JSON.stringify({ planType: 'meal_plan_generation', phoneNumber: '0712345678', mpesaMessage: 'not a real confirmation message at all' }),
+    });
+    assert('A message with no code-shaped token → 400', noMessage.status === 400, `got ${noMessage.status} ${JSON.stringify(noMessage.body)}`);
+
+    const submitted = await req('/api/payments/mpesa/till-submit', {
+      method: 'POST', headers: { Cookie: userCookie },
+      body: JSON.stringify({ planType: 'meal_plan_generation', phoneNumber: '0712345678', mpesaMessage: fullMessage }),
+    });
+    assert('Full pasted confirmation SMS is accepted → 200', submitted.status === 200, `got ${submitted.status} ${JSON.stringify(submitted.body)}`);
+
+    if (submitted.status === 200) {
+      const { data: row } = await admin.from('payments').select('mpesa_receipt, mpesa_raw_message').eq('id', submitted.body.paymentId).single();
+      assert('The correct transaction code was extracted from the pasted message', row?.mpesa_receipt === realisticCode, JSON.stringify(row));
+      assert('The full raw message was stored for admin review', row?.mpesa_raw_message === fullMessage, `stored length=${row?.mpesa_raw_message?.length}, expected length=${fullMessage.length}`);
+
+      // Admin sees the raw message via the user-detail endpoint.
+      const detail = await req(`/api/admin/users/${userId}`, { headers: { Cookie: adminCookie } });
+      const seen = (detail.body.payments || []).find((p) => p.id === submitted.body.paymentId);
+      assert('Admin user-detail view includes the full raw message for this payment', seen?.mpesaRawMessage === fullMessage, JSON.stringify(seen));
+
+      // Reject it so it doesn't linger as 'pending' and collide with later sections.
+      await req(`/api/admin/payments/${submitted.body.paymentId}/reject`, { method: 'POST', headers: { Cookie: adminCookie }, body: JSON.stringify({ reason: 'test cleanup' }) });
+    }
+  }
+
   // ── VERIFY: HAPPY PATH ───────────────────────────────────────────────────
   console.log('── [MOCK TEST] Verify a pending Till/meal_plan_generation payment ──');
   let verifiedPayment, verifiedCode, verifiedAccessCodeId, verifiedExpiresAt;

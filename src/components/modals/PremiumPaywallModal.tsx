@@ -11,7 +11,7 @@ export const PremiumPaywallModal: React.FC = () => {
 
   const [selectedPlan, setSelectedPlan] = useState<'weekly' | 'monthly'>('weekly');
   const [phone, setPhone] = useState('0712345678');
-  const [mpesaCode, setMpesaCode] = useState('');
+  const [mpesaMessage, setMpesaMessage] = useState('');
   const [tillNumber, setTillNumber] = useState<string | null>(null);
   const [step, setStep] = useState<'plan' | 'stk_pending' | 'success' | 'failed' | 'till' | 'till_submitted'>('plan');
   const [isLoading, setIsLoading] = useState(false);
@@ -101,7 +101,7 @@ export const PremiumPaywallModal: React.FC = () => {
     setIsLoading(true);
     setError('');
     try {
-      await api.submitTillPayment(selectedPlan, phone, mpesaCode);
+      await api.submitTillPayment(selectedPlan, phone, mpesaMessage);
       setStep('till_submitted');
     } catch (err: any) {
       setError(err.message || 'Could not submit your payment for verification.');
@@ -253,21 +253,20 @@ export const PremiumPaywallModal: React.FC = () => {
                 </div>
               </div>
               <div>
-                <label className="text-xs font-bold text-[#17201A] block mb-1">M-Pesa Transaction Code</label>
+                <label className="text-xs font-bold text-[#17201A] block mb-1">M-Pesa Confirmation Message</label>
                 <div className="relative">
                   <KeyRound className="w-4 h-4 text-[#66736A] absolute left-3 top-3" />
-                  <input
-                    type="text"
+                  <textarea
                     required
-                    autoCapitalize="characters"
-                    placeholder="e.g. QGH7XYZ123"
-                    value={mpesaCode}
-                    onChange={(e) => setMpesaCode(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2.5 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#14532D] uppercase"
+                    rows={3}
+                    placeholder="Paste the full SMS, e.g. QGH7XYZ123 Confirmed. Ksh50.00 paid to MLO WANGU..."
+                    value={mpesaMessage}
+                    onChange={(e) => setMpesaMessage(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2.5 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#14532D] resize-none"
                   />
                 </div>
                 <p className="text-[10px] text-[#66736A] mt-1">
-                  From your M-Pesa confirmation SMS. This will be sent to an admin for review — Premium activates automatically once confirmed.
+                  Paste the whole confirmation SMS you received — we'll find the transaction code in it. This goes to an admin for review; Premium activates automatically once confirmed.
                 </p>
               </div>
               {error && <p className="text-[11px] text-red-600 font-semibold">{error}</p>}

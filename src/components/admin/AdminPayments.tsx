@@ -145,7 +145,10 @@ export const AdminPayments: React.FC = () => {
                   </td>
                   <td className="py-2.5 px-3"><StatusBadge status={p.status} /></td>
                   <td className="py-2.5 px-3 text-[#66736A]">{formatDate(p.createdAt)}</td>
-                  <td className="py-2.5 px-3 font-mono text-[10px]">{p.mpesaReceipt || '—'}</td>
+                  <td className="py-2.5 px-3 font-mono text-[10px]">
+                    {p.mpesaReceipt || '—'}
+                    {p.mpesaRawMessage && <span className="text-[#66736A] ml-1" title={p.mpesaRawMessage}>(full SMS ⓘ)</span>}
+                  </td>
                   <td className="py-2.5 px-3 text-right">
                     {p.status === 'pending' && isTillGeneration(p) && (
                       rejectingId === p.id ? (

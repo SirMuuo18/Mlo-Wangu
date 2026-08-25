@@ -95,6 +95,10 @@ export interface PaymentRecord {
   checkoutRequestId: string | null;
   merchantRequestId: string | null;
   mpesaReceipt: string | null;
+  // Full pasted M-Pesa confirmation SMS for a till_manual submission — the
+  // code itself is still extracted into mpesaReceipt above. Null for
+  // stk_push payments.
+  mpesaRawMessage: string | null;
   resultDesc: string | null;
   createdAt: string;
   verifiedAt: string | null;
@@ -195,7 +199,7 @@ export interface IDatabaseAdapter {
   // granted. Returns null (never throws) if the receipt code was already
   // used by another payment — the unique index on mpesa_receipt is the
   // actual guarantee, this is just a clean way to surface that to the caller.
-  createPendingTillPayment(userId: string, data: { amountKsh: number; phoneNumber: string; planType: PaymentPlanType; mpesaCode: string }): Promise<PaymentRecord | null>;
+  createPendingTillPayment(userId: string, data: { amountKsh: number; phoneNumber: string; planType: PaymentPlanType; mpesaCode: string; mpesaRawMessage?: string }): Promise<PaymentRecord | null>;
   setPaymentCheckoutIds(paymentId: string, data: { checkoutRequestId: string; merchantRequestId: string }): Promise<void>;
   getPaymentById(paymentId: string): Promise<PaymentRecord | null>;
   getPaymentByCheckoutRequestId(checkoutRequestId: string): Promise<PaymentRecord | null>;

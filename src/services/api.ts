@@ -117,10 +117,12 @@ export const api = {
   // for both Premium and the generation gate. Never auto-verified; always
   // lands as a 'pending' payment awaiting admin confirmation.
   getTillInfo: () => request<{ tillNumber: string }>('/api/payments/mpesa/till-info'),
-  submitTillPayment: (planType: 'weekly' | 'monthly' | 'meal_plan_generation', phoneNumber: string, mpesaCode: string) =>
+  // mpesaMessage is the FULL pasted M-Pesa confirmation SMS — the server
+  // extracts the transaction code from it, never trusting a client-parsed code.
+  submitTillPayment: (planType: 'weekly' | 'monthly' | 'meal_plan_generation', phoneNumber: string, mpesaMessage: string) =>
     request<{ paymentId: string; status: string; amountKsh: number; message: string }>('/api/payments/mpesa/till-submit', {
       method: 'POST',
-      body: JSON.stringify({ planType, phoneNumber, mpesaCode }),
+      body: JSON.stringify({ planType, phoneNumber, mpesaMessage }),
     }),
 
   // Household
@@ -313,7 +315,7 @@ export interface AdminUserDetail {
     entitlements: { id: string; source: string; createdAt: string; expiresAt: string | null; usedAt: string | null }[];
     accessCodes: { id: string; status: string; maxUses: number; usedCount: number; expiresAt: string; createdAt: string; description: string | null }[];
   };
-  payments: { id: string; amountKsh: number; phoneNumber: string; planType: string; status: string; paymentMethod: 'stk_push' | 'till_manual'; mpesaReceipt: string | null; createdAt: string; verifiedAt: string | null }[];
+  payments: { id: string; amountKsh: number; phoneNumber: string; planType: string; status: string; paymentMethod: 'stk_push' | 'till_manual'; mpesaReceipt: string | null; mpesaRawMessage: string | null; createdAt: string; verifiedAt: string | null }[];
   subscription: { planType: string; priceKsh: number; status: string; startDate: string | null; endDate: string | null } | null;
   household: { id: string; name: string; memberCount: number } | null;
   recentNotifications: AdminUserNotification[];
@@ -321,7 +323,7 @@ export interface AdminUserDetail {
 
 export interface AdminPaymentRow {
   id: string; userId: string; userEmail: string | null; amountKsh: number; phoneNumber: string;
-  planType: string; status: string; paymentMethod: 'stk_push' | 'till_manual'; mpesaReceipt: string | null; createdAt: string; verifiedAt: string | null;
+  planType: string; status: string; paymentMethod: 'stk_push' | 'till_manual'; mpesaReceipt: string | null; mpesaRawMessage: string | null; createdAt: string; verifiedAt: string | null;
 }
 export interface AdminUserNotification { id: string; title: string; type: string; isRead: boolean; createdAt: string; }
 export interface AdminPaymentListResult { payments: AdminPaymentRow[]; total: number; page: number; pageSize: number; }

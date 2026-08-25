@@ -23,6 +23,7 @@ function mapPayment(row: Record<string, unknown>): PaymentRecord {
     checkoutRequestId: (row.checkout_request_id as string) ?? null,
     merchantRequestId: (row.merchant_request_id as string) ?? null,
     mpesaReceipt: (row.mpesa_receipt as string) ?? null,
+    mpesaRawMessage: (row.mpesa_raw_message as string) ?? null,
     resultDesc: (row.result_desc as string) ?? null,
     createdAt: row.created_at as string,
     verifiedAt: (row.verified_at as string) ?? null,
@@ -454,7 +455,7 @@ export class SupabaseDatabaseAdapter implements IDatabaseAdapter {
     return mapPayment(row);
   }
 
-  async createPendingTillPayment(userId: string, data: { amountKsh: number; phoneNumber: string; planType: PaymentPlanType; mpesaCode: string }): Promise<PaymentRecord | null> {
+  async createPendingTillPayment(userId: string, data: { amountKsh: number; phoneNumber: string; planType: PaymentPlanType; mpesaCode: string; mpesaRawMessage?: string }): Promise<PaymentRecord | null> {
     const { data: row, error } = await this.db.from('payments').insert({
       user_id: userId,
       amount_ksh: data.amountKsh,
@@ -463,6 +464,7 @@ export class SupabaseDatabaseAdapter implements IDatabaseAdapter {
       status: 'pending',
       payment_method: 'till_manual',
       mpesa_receipt: data.mpesaCode,
+      mpesa_raw_message: data.mpesaRawMessage ?? null,
     }).select('*').single();
     if (error) {
       // Postgres unique_violation on idx_payments_receipt — this code was
