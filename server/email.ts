@@ -1,21 +1,30 @@
 // Transactional email — access-code delivery/resend.
-// Modeled on mpesa.ts's getDarajaConfig(): config resolved from env, returns
-// null (never throws) if unconfigured, so every caller fails closed exactly
-// like the rest of this codebase's external integrations. Uses Resend's
-// HTTP API via fetch — no new SDK, same style as every other outbound call
-// here (Daraja, Supabase, Gemini are all bare fetch/thin-SDK, never a raw
-// SMTP socket).
+// Sends via SMTP (nodemailer) using a real mailbox — defaults to Gmail's
+// SMTP endpoint, since that's what this deployment is configured with
+// (an app password, not the account's real password — Gmail rejects plain
+// password SMTP login). Host/port are still overridable via env for a
+// future switch to a different SMTP provider without code changes.
+// Config resolved from env, returns null (never throws) if unconfigured —
+// same fail-closed pattern as mpesa.ts's getDarajaConfig(); every caller
+// treats a missing config exactly like any other send failure.
+import nodemailer from 'nodemailer';
 
 interface EmailConfig {
-  apiKey: string;
+  host: string;
+  port: number;
+  user: string;
+  pass: string;
   fromAddress: string;
 }
 
 export function getEmailConfig(): EmailConfig | null {
-  const apiKey = process.env.RESEND_API_KEY;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
   const fromAddress = process.env.EMAIL_FROM_ADDRESS;
-  if (!apiKey || !fromAddress) return null;
-  return { apiKey, fromAddress };
+  if (!user || !pass || !fromAddress) return null;
+  const host = process.env.SMTP_HOST || 'smtp.gmail.com';
+  const port = Number(process.env.SMTP_PORT) || 465;
+  return { host, port, user, pass, fromAddress };
 }
 
 export interface SendEmailResult {
@@ -25,29 +34,27 @@ export interface SendEmailResult {
 
 // Never throws — callers treat a failure as non-fatal (log to email_log,
 // never roll back the payment/notification/access-code that triggered it).
+// A fresh transport is created per call rather than kept as module-level
+// state — this runs in a serverless function where a long-lived SMTP
+// connection can't be relied on to survive between invocations anyway.
 export async function sendEmail(opts: { to: string; subject: string; html: string; text: string }): Promise<SendEmailResult> {
   const config = getEmailConfig();
   if (!config) return { ok: false, error: 'not_configured' };
 
   try {
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: config.fromAddress,
-        to: [opts.to],
-        subject: opts.subject,
-        html: opts.html,
-        text: opts.text,
-      }),
+    const transport = nodemailer.createTransport({
+      host: config.host,
+      port: config.port,
+      secure: config.port === 465,
+      auth: { user: config.user, pass: config.pass },
     });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      return { ok: false, error: `Resend API returned ${res.status}: ${body.slice(0, 300)}` };
-    }
+    await transport.sendMail({
+      from: `"Mlo Wangu" <${config.fromAddress}>`,
+      to: opts.to,
+      subject: opts.subject,
+      html: opts.html,
+      text: opts.text,
+    });
     return { ok: true };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'Email send failed' };
