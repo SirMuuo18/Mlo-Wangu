@@ -655,26 +655,36 @@ async function insertAccessCode(opts: { userId: string; paymentId?: string; desc
 // unconfigured send is logged and returned to the caller as informational
 // only; it must never roll back a verified payment or a just-issued code.
 async function deliverAccessCodeEmail(opts: { userId: string; paymentId: string; code: string; expiresAt: string | null; emailType: string }): Promise<void> {
-  const user = await secureDb.getUser(opts.userId);
-  const recipient = (user as any)?.email as string | undefined;
+  // The whole function is one try/catch, not just sendEmail() — even an
+  // unexpected exception here (a network-level throw, an email_log insert
+  // failing) must never propagate out and turn an already-committed payment
+  // verification/code issuance into a reported failure. sendEmail() itself
+  // already fails closed internally; this is defense-in-depth for the rest
+  // of this function.
+  try {
+    const user = await secureDb.getUser(opts.userId);
+    const recipient = (user as any)?.email as string | undefined;
 
-  if (!recipient) {
+    if (!recipient) {
+      await db().from('email_log').insert({
+        user_id: opts.userId, recipient: '(no email on file)', email_type: opts.emailType,
+        status: 'failed', related_payment_id: opts.paymentId, error: 'User has no email on file',
+      });
+      return;
+    }
+
+    const { subject, html, text } = buildAccessCodeEmail({ code: opts.code, expiresAt: opts.expiresAt });
+    const result = await sendEmail({ to: recipient, subject, html, text });
+
     await db().from('email_log').insert({
-      user_id: opts.userId, recipient: '(no email on file)', email_type: opts.emailType,
-      status: 'failed', related_payment_id: opts.paymentId, error: 'User has no email on file',
+      user_id: opts.userId, recipient, email_type: opts.emailType,
+      status: result.ok ? 'sent' : (result.error === 'not_configured' ? 'not_configured' : 'failed'),
+      related_payment_id: opts.paymentId,
+      error: result.ok ? null : result.error,
     });
-    return;
+  } catch (err: any) {
+    console.error('[deliverAccessCodeEmail] unexpected failure (non-critical — payment/code already committed):', err?.message || err);
   }
-
-  const { subject, html, text } = buildAccessCodeEmail({ code: opts.code, expiresAt: opts.expiresAt });
-  const result = await sendEmail({ to: recipient, subject, html, text });
-
-  await db().from('email_log').insert({
-    user_id: opts.userId, recipient, email_type: opts.emailType,
-    status: result.ok ? 'sent' : (result.error === 'not_configured' ? 'not_configured' : 'failed'),
-    related_payment_id: opts.paymentId,
-    error: result.ok ? null : result.error,
-  });
 }
 
 function computeAccessCodeStatus(row: { active: boolean; expires_at: string; used_count: number; max_uses: number }): AccessCodeStatus {
