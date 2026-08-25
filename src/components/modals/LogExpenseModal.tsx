@@ -1,12 +1,17 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { X, Plus, DollarSign, Calendar, AlertCircle } from 'lucide-react';
+import { ExpenseCategory } from '../../types';
 
 export const LogExpenseModal: React.FC = () => {
   const { isLogExpenseModalOpen, setIsLogExpenseModalOpen, logExpense } = useApp();
 
   const [amountKsh, setAmountKsh] = useState('');
-  const [category, setCategory] = useState('food');
+  // Must match the canonical ExpenseCategory casing exactly — budget
+  // categories and expense categories are compared by exact string, so a
+  // lowercase value here would silently create a separate phantom category
+  // instead of reducing the real one's remaining balance.
+  const [category, setCategory] = useState<ExpenseCategory>('Food');
   const [description, setDescription] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [isLoading, setIsLoading] = useState(false);
@@ -88,16 +93,19 @@ export const LogExpenseModal: React.FC = () => {
             <label className="font-bold text-[#17201A] block mb-1">Category</label>
             <select
               value={category}
-              onChange={(e) => setCategory(e.target.value)}
+              onChange={(e) => setCategory(e.target.value as ExpenseCategory)}
               className="w-full px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl font-semibold focus:outline-none"
             >
-              <option value="food">Food & Groceries (Sukuma, Unga, Meat)</option>
-              <option value="rent">Rent & Housing</option>
-              <option value="transport">Transport (Matatu, Fuel, Boda)</option>
-              <option value="bills">Utilities & Bills (KPLC Tokens, Water, Internet)</option>
-              <option value="savings">Savings & Chama (Sacco, M-Shwari)</option>
-              <option value="debt">Debt / Loan Repayment</option>
-              <option value="other">Other / Miscellaneous</option>
+              <option value="Food">Food & Groceries (Sukuma, Unga, Meat)</option>
+              <option value="Rent">Rent & Housing</option>
+              <option value="Transport">Transport (Matatu, Fuel, Boda)</option>
+              <option value="Bills">Utilities & Bills (KPLC Tokens, Water, Internet)</option>
+              <option value="Shopping">Shopping</option>
+              <option value="Entertainment">Entertainment</option>
+              <option value="Health">Health</option>
+              <option value="Savings">Savings & Chama (Sacco, M-Shwari)</option>
+              <option value="Debt">Debt / Loan Repayment</option>
+              <option value="Other">Other / Miscellaneous</option>
             </select>
           </div>
 

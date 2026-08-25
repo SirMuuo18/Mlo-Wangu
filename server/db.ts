@@ -531,6 +531,17 @@ class DatabaseManager {
       suggestedAction = 'Leverage bulk pantry staples like Githeri, Rice, and Ndengu.';
     }
 
+    const warnings: string[] = [];
+    for (const cat of budget?.categories || []) {
+      if (!cat.plannedAmountKsh) continue;
+      const catSpent = expenses.filter((e) => e.category === cat.category).reduce((sum, e) => sum + e.amountKsh, 0);
+      if (catSpent > cat.plannedAmountKsh) {
+        warnings.push(`You've exceeded your ${cat.category} budget by KSh ${(catSpent - cat.plannedAmountKsh).toLocaleString()}.`);
+      } else if (catSpent / cat.plannedAmountKsh >= 0.8) {
+        warnings.push(`You've used ${Math.round((catSpent / cat.plannedAmountKsh) * 100)}% of your ${cat.category} budget.`);
+      }
+    }
+
     return {
       foodBudgetPlannedKsh: foodPlanned,
       foodBudgetSpentKsh: foodSpent,
@@ -543,6 +554,10 @@ class DatabaseManager {
       alertType,
       alertMessage,
       suggestedAction,
+      dailySafeSpendingKsh: dailyAllowance,
+      projectedMonthEndSpendKsh: projectedMonthEnd,
+      recommendations: suggestedAction ? [suggestedAction] : [],
+      warnings,
     };
   }
 

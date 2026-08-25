@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { Lock, Unlock, Bell, ShieldCheck, User, X, Check, Droplet, Utensils, Bot } from 'lucide-react';
+import { Lock, Unlock, Bell, ShieldCheck, User, X, Check, Droplet, Utensils, Bot, KeyRound } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
   const {
@@ -174,7 +174,13 @@ export const Navbar: React.FC = () => {
                         }`}
                       >
                         <div className="mt-0.5 p-1.5 rounded-lg bg-white border border-[#E8E5DD] text-[#14532D]">
-                          {n.type === 'water' ? <Droplet className="w-4 h-4 text-blue-600" /> : <Utensils className="w-4 h-4 text-[#14532D]" />}
+                          {n.data?.accessCode ? (
+                            <KeyRound className="w-4 h-4 text-[#F4B942]" />
+                          ) : n.type === 'water' ? (
+                            <Droplet className="w-4 h-4 text-blue-600" />
+                          ) : (
+                            <Utensils className="w-4 h-4 text-[#14532D]" />
+                          )}
                         </div>
                         <div className="flex-1">
                           <div className="flex items-center justify-between">

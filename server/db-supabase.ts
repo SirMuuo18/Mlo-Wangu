@@ -26,6 +26,8 @@ function mapPayment(row: Record<string, unknown>): PaymentRecord {
     resultDesc: (row.result_desc as string) ?? null,
     createdAt: row.created_at as string,
     verifiedAt: (row.verified_at as string) ?? null,
+    verifiedBy: (row.verified_by as string) ?? null,
+    rejectionReason: (row.rejection_reason as string) ?? null,
   };
 }
 
@@ -38,6 +40,7 @@ function mapAccessCode(row: Record<string, unknown>): AccessCodeRecord {
     maxUses: row.max_uses as number,
     usedCount: row.used_count as number,
     userId: (row.user_id as string) ?? null,
+    paymentId: (row.payment_id as string) ?? null,
   };
 }
 
@@ -503,12 +506,14 @@ export class SupabaseDatabaseAdapter implements IDatabaseAdapter {
   // relies on Postgres row-level atomicity as the idempotency mechanism — if
   // a concurrent/duplicate callback already flipped the row, this update
   // matches zero rows and we return null rather than double-processing.
-  async transitionPayment(paymentId: string, expectedStatus: PaymentStatus, patch: Partial<Pick<PaymentRecord, 'status' | 'mpesaReceipt' | 'resultDesc' | 'verifiedAt'>> & { rawCallback?: unknown }): Promise<PaymentRecord | null> {
+  async transitionPayment(paymentId: string, expectedStatus: PaymentStatus, patch: Partial<Pick<PaymentRecord, 'status' | 'mpesaReceipt' | 'resultDesc' | 'verifiedAt' | 'verifiedBy' | 'rejectionReason'>> & { rawCallback?: unknown }): Promise<PaymentRecord | null> {
     const dbPatch: Record<string, unknown> = {};
     if (patch.status !== undefined) dbPatch.status = patch.status;
     if (patch.mpesaReceipt !== undefined) dbPatch.mpesa_receipt = patch.mpesaReceipt;
     if (patch.resultDesc !== undefined) dbPatch.result_desc = patch.resultDesc;
     if (patch.verifiedAt !== undefined) dbPatch.verified_at = patch.verifiedAt;
+    if (patch.verifiedBy !== undefined) dbPatch.verified_by = patch.verifiedBy;
+    if (patch.rejectionReason !== undefined) dbPatch.rejection_reason = patch.rejectionReason;
     if (patch.rawCallback !== undefined) dbPatch.daraja_callback_raw = patch.rawCallback;
 
     const { data, error } = await this.db.from('payments')

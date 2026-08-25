@@ -7,10 +7,10 @@ const POLL_INTERVAL_MS = 2500;
 const POLL_TIMEOUT_MS = 90_000;
 const PRICE_KSH = 50;
 
-type Step = 'intro' | 'phone' | 'stk_pending' | 'payment_failed' | 'payment_success' | 'access_code' | 'till' | 'till_submitted' | 'generating' | 'generated' | 'generation_failed';
+type Step = 'intro' | 'phone' | 'stk_pending' | 'payment_failed' | 'payment_success' | 'access_code' | 'till' | 'till_submitted' | 'till_verified' | 'till_rejected' | 'generating' | 'generated' | 'generation_failed';
 
 export const GeneratePlanModal: React.FC = () => {
-  const { isGeneratePlanModalOpen, setIsGeneratePlanModalOpen, regenerateMealPlan } = useApp();
+  const { isGeneratePlanModalOpen, setIsGeneratePlanModalOpen, regenerateMealPlan, refreshAll } = useApp();
 
   const [step, setStep] = useState<Step>('intro');
   const [phone, setPhone] = useState('0712345678');
@@ -59,29 +59,50 @@ export const GeneratePlanModal: React.FC = () => {
     }
   };
 
-  // Premium only ever activates from the server's own recorded payment
-  // status — this polls that status, it never assumes success on its own.
-  const pollPaymentStatus = (paymentId: string) => {
+  // Premium/access only ever activates from the server's own recorded
+  // payment status — this polls that status, it never assumes success on its
+  // own. `tillGate: true` is used for the Till "Generate New Plan" path,
+  // which differs from STK in two ways: (1) unlike an STK push (an instant
+  // M-Pesa PIN prompt), a Till submission waits on manual admin review,
+  // which can reasonably take far longer than the STK poll's 90s window —
+  // timing that out would misreport a still-pending review as a failure;
+  // (2) a verified Till payment issues an access CODE (delivered via
+  // notification/email), not a direct entitlement the way STK/callback does
+  // — so 'success' here must NOT immediately call runGeneration() the way
+  // the STK path does, since no entitlement exists yet until the user
+  // separately redeems that code.
+  const pollPaymentStatus = (paymentId: string, opts?: { tillGate?: boolean }) => {
     const startedAt = Date.now();
     const poll = async () => {
       try {
         const { payment } = await api.getPaymentStatus(paymentId);
         if (payment.status === 'success') {
-          setStep('payment_success');
-          setTimeout(runGeneration, 900);
+          if (opts?.tillGate) {
+            setStep('till_verified');
+            refreshAll().catch(() => {}); // pick up the new access-code notification immediately
+          } else {
+            setStep('payment_success');
+            setTimeout(runGeneration, 900);
+          }
+          return;
+        }
+        if (payment.status === 'rejected') {
+          setError(payment.rejectionReason || 'Your payment could not be verified.');
+          setStep('till_rejected');
+          refreshAll().catch(() => {});
           return;
         }
         if (payment.status === 'failed' || payment.status === 'cancelled' || payment.status === 'expired') {
           setStep('payment_failed');
           return;
         }
-        if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        if (!opts?.tillGate && Date.now() - startedAt > POLL_TIMEOUT_MS) {
           setStep('payment_failed');
           setError('We did not receive a payment confirmation in time.');
           return;
         }
       } catch {
-        if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        if (!opts?.tillGate && Date.now() - startedAt > POLL_TIMEOUT_MS) {
           setStep('payment_failed');
           return;
         }
@@ -121,16 +142,19 @@ export const GeneratePlanModal: React.FC = () => {
     }
   };
 
-  // This never grants access itself — it only submits the code for an
-  // admin to verify. The entitlement only appears once confirmed; there's
-  // nothing to poll here since success isn't determined client-side.
+  // This never grants access itself — it only submits the code for an admin
+  // to verify. Polls the same server-recorded status the STK path does, so
+  // this screen updates live once an admin verifies or rejects it — the
+  // access code itself is never returned here, only delivered via the
+  // notification bell (and email, when configured).
   const handleSubmitTill = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setError('');
     try {
-      await api.submitTillPayment('meal_plan_generation', phone, mpesaCode);
+      const res = await api.submitTillPayment('meal_plan_generation', phone, mpesaCode);
       setStep('till_submitted');
+      pollPaymentStatus(res.paymentId, { tillGate: true });
     } catch (err: any) {
       setError(err.message || 'Could not submit your payment for verification.');
     } finally {
@@ -273,18 +297,55 @@ export const GeneratePlanModal: React.FC = () => {
 
         {step === 'till_submitted' && (
           <div className="text-center py-6 space-y-4">
-            <div className="w-16 h-16 rounded-full bg-amber-50 text-amber-600 border border-amber-200 flex items-center justify-center mx-auto">
+            <div className="w-16 h-16 rounded-full bg-amber-50 text-amber-600 border border-amber-200 flex items-center justify-center mx-auto animate-pulse">
               <Clock3 className="w-8 h-8" />
             </div>
             <h3 className="text-xl font-extrabold text-[#17201A]">Submitted for verification</h3>
             <p className="text-xs text-[#66736A] max-w-xs mx-auto">
-              We'll confirm your payment shortly. Once confirmed, you'll see it in the app automatically — just come back and tap Generate again.
+              An admin will review your payment and issue your access code — this screen will update automatically. You can also close this and check the notification bell later.
             </p>
             <button
               onClick={close}
               className="w-full py-3 px-4 bg-[#14532D] text-white font-extrabold text-xs rounded-xl hover:bg-[#0f3e22] cursor-pointer"
             >
               Done
+            </button>
+          </div>
+        )}
+
+        {step === 'till_verified' && (
+          <div className="text-center py-6 space-y-4">
+            <div className="w-16 h-16 rounded-full bg-green-100 text-green-700 flex items-center justify-center mx-auto">
+              <CheckCircle2 className="w-8 h-8" />
+            </div>
+            <h3 className="text-xl font-extrabold text-[#17201A]">Payment verified!</h3>
+            <p className="text-xs text-[#66736A] max-w-xs mx-auto">
+              Your access code is ready — check the notification bell (top of the app) for it, then come back here and choose "Enter Access Code".
+            </p>
+            <button
+              onClick={() => { setError(''); setStep('access_code'); }}
+              className="w-full py-3 px-4 bg-[#14532D] text-white font-extrabold text-xs rounded-xl hover:bg-[#0f3e22] cursor-pointer"
+            >
+              Enter Access Code Now
+            </button>
+            <button onClick={close} className="w-full text-[11px] text-[#66736A] hover:text-[#17201A] cursor-pointer">
+              I'll do this later
+            </button>
+          </div>
+        )}
+
+        {step === 'till_rejected' && (
+          <div className="text-center py-6 space-y-4">
+            <div className="w-16 h-16 rounded-full bg-red-50 text-red-600 border border-red-200 flex items-center justify-center mx-auto">
+              <X className="w-8 h-8" />
+            </div>
+            <h3 className="text-xl font-extrabold text-[#17201A]">Payment could not be verified</h3>
+            <p className="text-xs text-[#66736A] max-w-xs mx-auto">{error || 'Please check your M-Pesa code and try again, or contact support.'}</p>
+            <button
+              onClick={() => { setError(''); setStep('intro'); }}
+              className="w-full py-3 px-4 bg-[#14532D] text-white font-extrabold text-xs rounded-xl hover:bg-[#0f3e22] cursor-pointer"
+            >
+              Try Again
             </button>
           </div>
         )}

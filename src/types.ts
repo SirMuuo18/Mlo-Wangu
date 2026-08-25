@@ -172,6 +172,16 @@ export interface OverspendingAnalysis {
   alertType: 'danger' | 'warning' | 'positive' | 'savings';
   alertMessage: string;
   suggestedAction?: string;
+  // Aliases of recommendedDailyAllowanceKsh/projectedMonthEndSpendingKsh/
+  // suggestedAction — kept as separate fields (not renames) because the
+  // original names are also read elsewhere (server.ts's AI-chat context).
+  dailySafeSpendingKsh: number;
+  projectedMonthEndSpendKsh: number;
+  recommendations: string[];
+  // General, all-category warnings (e.g. "used 80% of Transport budget",
+  // "exceeded Food budget by KSh 500") — additive to the Food-specific
+  // fields above, which stay unchanged for backward compatibility.
+  warnings: string[];
 }
 
 export interface UserProfile {
@@ -204,4 +214,10 @@ export interface NotificationItem {
   isRead: boolean;
   createdAt: string;
   userId?: string; // undefined/null = global notification (visible to all); set = private to that user
+  // Structured payload for machine-readable delivery — currently used only
+  // by the Till-payment access-code flow. accessCode is the ONE place its
+  // plaintext is ever persisted after issuance (never in the DB — see
+  // meal_plan_access_codes' hash-only storage); admin "Resend Code Email"
+  // reads it back from here rather than a second plaintext store.
+  data?: { accessCode?: string; paymentId?: string; expiresAt?: string | null; rejectionReason?: string };
 }

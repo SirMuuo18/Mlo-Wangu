@@ -222,7 +222,7 @@ export const api = {
       body: JSON.stringify({ phoneNumber, planType }),
     }),
   getPaymentStatus: (paymentId: string) =>
-    request<{ payment: { id: string; status: 'pending' | 'success' | 'failed' | 'cancelled' | 'expired'; amountKsh: number; planType: string; createdAt: string; verifiedAt: string | null; mpesaReceipt: string | null } }>(`/api/payments/${paymentId}`),
+    request<{ payment: { id: string; status: 'pending' | 'success' | 'failed' | 'cancelled' | 'expired' | 'rejected'; amountKsh: number; planType: string; createdAt: string; verifiedAt: string | null; mpesaReceipt: string | null; rejectionReason: string | null } }>(`/api/payments/${paymentId}`),
   getSubscriptionStatus: () => request<{ isPremium: boolean; subscription?: Subscription | null }>('/api/subscription/status'),
 
   // Notifications
@@ -250,6 +250,18 @@ export const api = {
     request<AdminPaymentListResult>(`/api/admin/payments?${status ? `status=${status}&` : ''}page=${page}&pageSize=${pageSize}`),
   confirmAdminPayment: (paymentId: string) =>
     request<{ success: boolean; message: string }>(`/api/admin/payments/${paymentId}/confirm`, { method: 'POST' }),
+  verifyTillPayment: (paymentId: string) =>
+    request<{ success: boolean; accessCodeId: string; code: string | null; expiresAt: string | null; alreadyVerified: boolean }>(
+      `/api/admin/payments/${paymentId}/verify-till`, { method: 'POST' }
+    ),
+  rejectTillPayment: (paymentId: string, reason: string) =>
+    request<{ success: boolean }>(`/api/admin/payments/${paymentId}/reject`, {
+      method: 'POST', body: JSON.stringify({ reason }),
+    }),
+  resendAccessCodeEmail: (paymentId: string) =>
+    request<{ success: boolean; mode: 'resent_existing' | 'reissued_new' }>(
+      `/api/admin/payments/${paymentId}/resend-code-email`, { method: 'POST' }
+    ),
   getAdminAccessCodes: (status?: string, page = 1, pageSize = 20) =>
     request<AdminAccessCodeListResult>(`/api/admin/access-codes?${status ? `status=${status}&` : ''}page=${page}&pageSize=${pageSize}`),
   issueAdminAccessCode: (userId: string, description?: string) =>
@@ -304,12 +316,14 @@ export interface AdminUserDetail {
   payments: { id: string; amountKsh: number; phoneNumber: string; planType: string; status: string; paymentMethod: 'stk_push' | 'till_manual'; mpesaReceipt: string | null; createdAt: string; verifiedAt: string | null }[];
   subscription: { planType: string; priceKsh: number; status: string; startDate: string | null; endDate: string | null } | null;
   household: { id: string; name: string; memberCount: number } | null;
+  recentNotifications: AdminUserNotification[];
 }
 
 export interface AdminPaymentRow {
   id: string; userId: string; userEmail: string | null; amountKsh: number; phoneNumber: string;
   planType: string; status: string; paymentMethod: 'stk_push' | 'till_manual'; mpesaReceipt: string | null; createdAt: string; verifiedAt: string | null;
 }
+export interface AdminUserNotification { id: string; title: string; type: string; isRead: boolean; createdAt: string; }
 export interface AdminPaymentListResult { payments: AdminPaymentRow[]; total: number; page: number; pageSize: number; }
 
 export interface AdminAccessCodeRow {

@@ -74,7 +74,7 @@ export interface PinLockoutStatus {
   failedAttempts: number;
 }
 
-export type PaymentStatus = 'pending' | 'success' | 'failed' | 'cancelled' | 'expired';
+export type PaymentStatus = 'pending' | 'success' | 'failed' | 'cancelled' | 'expired' | 'rejected';
 
 // 'meal_plan_generation' is a one-off KSh 50 purchase (the "Generate New
 // Plan" gate) — distinct from the 'weekly'/'monthly' subscription plans and
@@ -98,6 +98,12 @@ export interface PaymentRecord {
   resultDesc: string | null;
   createdAt: string;
   verifiedAt: string | null;
+  // Set only by the admin Till-verification/rejection actions
+  // (verifyTillPayment/rejectTillPayment in admin-db.ts) — null for every
+  // other payment (STK-verified via the real Daraja callback never sets
+  // these; a client can never set them either way).
+  verifiedBy: string | null;
+  rejectionReason: string | null;
 }
 
 // ── "Generate New Plan" gate ────────────────────────────────────────────────
@@ -112,6 +118,10 @@ export interface AccessCodeRecord {
   maxUses: number;
   usedCount: number;
   userId: string | null;
+  // Set only when this code was issued by the Till-verification flow
+  // (verifyTillPayment in admin-db.ts) — null for a manually-issued support
+  // code. A payment can back at most one access code (unique partial index).
+  paymentId: string | null;
 }
 
 export interface EntitlementRecord {
@@ -193,7 +203,7 @@ export interface IDatabaseAdapter {
   // Guarded transition: only succeeds if the payment's current status still
   // equals expectedStatus. Returns null if it doesn't (already processed by
   // a concurrent/duplicate callback) — this IS the idempotency mechanism.
-  transitionPayment(paymentId: string, expectedStatus: PaymentStatus, patch: Partial<Pick<PaymentRecord, 'status' | 'mpesaReceipt' | 'resultDesc' | 'verifiedAt'>> & { rawCallback?: unknown }): Promise<PaymentRecord | null>;
+  transitionPayment(paymentId: string, expectedStatus: PaymentStatus, patch: Partial<Pick<PaymentRecord, 'status' | 'mpesaReceipt' | 'resultDesc' | 'verifiedAt' | 'verifiedBy' | 'rejectionReason'>> & { rawCallback?: unknown }): Promise<PaymentRecord | null>;
   getLatestSubscription(userId: string): Promise<SubscriptionRecord | null>;
   createOrExtendSubscription(userId: string, data: { planType: 'weekly' | 'monthly'; priceKsh: number; durationDays: number; mpesaReceipt: string; paymentId: string }): Promise<SubscriptionRecord>;
   countActiveSubscriptions(): Promise<number>;

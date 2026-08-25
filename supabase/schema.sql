@@ -333,14 +333,21 @@ CREATE TABLE IF NOT EXISTS payments (
   merchant_request_id   TEXT,
   result_desc           TEXT,
   daraja_callback_raw   JSONB,  -- store raw callback for audit
-  status                TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','success','failed','cancelled','expired')),
+  -- 'rejected' = an admin explicitly declined a manually-submitted Till
+  -- payment (distinct from Daraja-side 'failed'/'cancelled', which only ever
+  -- apply to STK push). See migrations/0006_till_verification_access_codes.sql.
+  status                TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','success','failed','cancelled','expired','rejected')),
   -- 'stk_push' = automated Daraja push, verified by the real callback below.
   -- 'till_manual' = user paid via Till/Buy Goods on their own phone and
   -- submitted the M-Pesa code back into the app; stays 'pending' until an
   -- admin manually verifies and confirms it — never auto-verified.
   payment_method        TEXT NOT NULL DEFAULT 'stk_push' CHECK (payment_method IN ('stk_push', 'till_manual')),
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  verified_at           TIMESTAMPTZ
+  verified_at           TIMESTAMPTZ,
+  -- Who verified/rejected a manually-submitted payment, and why (rejection
+  -- only). NULL for STK-push payments, verified by the real Daraja callback.
+  verified_by           UUID REFERENCES profiles(id),
+  rejection_reason      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);
 CREATE INDEX IF NOT EXISTS idx_payments_checkout ON payments(checkout_request_id);
@@ -368,10 +375,18 @@ CREATE TABLE IF NOT EXISTS meal_plan_access_codes (
   max_uses     INTEGER NOT NULL DEFAULT 1 CHECK (max_uses > 0),
   used_count   INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
   description  TEXT,
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Set only when this code was issued by the Till-verification flow
+  -- (admin-db.ts's verifyTillPayment) rather than a manually-issued support
+  -- code (issueAccessCode). See migrations/0006_till_verification_access_codes.sql.
+  payment_id   UUID REFERENCES payments(id)
 );
 CREATE INDEX IF NOT EXISTS idx_access_codes_hash ON meal_plan_access_codes(code_hash);
 CREATE INDEX IF NOT EXISTS idx_access_codes_user ON meal_plan_access_codes(user_id);
+-- A given payment can back at most one access code, even under concurrent
+-- verification attempts.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_access_codes_payment_unique
+  ON meal_plan_access_codes(payment_id) WHERE payment_id IS NOT NULL;
 
 -- Database-authoritative 7-day expiry ceiling: no code (however it's
 -- inserted or updated) can ever end up with expires_at more than 7 days
@@ -599,6 +614,27 @@ CREATE POLICY "notifs_read" ON notifications FOR SELECT
 -- ai_conversations — PRIVATE
 ALTER TABLE ai_conversations ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "ai_owner" ON ai_conversations FOR ALL USING (auth.uid() = user_id);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- email_log — delivery log for transactional emails (currently: access-code
+-- delivery/resend). Never stores the email body/code itself. See
+-- migrations/0006_till_verification_access_codes.sql.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS email_log (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id             UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  recipient           TEXT NOT NULL,
+  email_type          TEXT NOT NULL,
+  status              TEXT NOT NULL CHECK (status IN ('sent','failed','not_configured')),
+  related_payment_id  UUID REFERENCES payments(id),
+  error               TEXT,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_email_log_user ON email_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_log_payment ON email_log(related_payment_id);
+
+-- email_log — service-role only, same pattern as admin_audit_log/support_notes.
+ALTER TABLE email_log ENABLE ROW LEVEL SECURITY;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Helper: clean up expired financial sessions (call via pg_cron or on-demand)

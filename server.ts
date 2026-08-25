@@ -173,6 +173,18 @@ const adminActionLimiter = rateLimit({
   handler: genericLimitHandler,
 });
 
+// Stacked on top of adminActionLimiter (same pattern as tillSubmitLimiter
+// alongside stkPushLimiter) specifically for the access-code resend action —
+// an admin re-triggering this repeatedly is a real (if low-severity) way to
+// spam a user's inbox, worth its own narrower ceiling.
+const emailResendLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
 // Initialize Gemini Client Lazily
 let genAIClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI | null {
@@ -1611,6 +1623,18 @@ app.post('/api/payments/mpesa/till-submit', requireAuth, tillSubmitLimiter, asyn
     return res.status(409).json({ error: 'This M-Pesa code has already been submitted, or could not be recorded. Please check the code and try again.' });
   }
 
+  try {
+    db.addNotification({
+      userId,
+      type: 'system',
+      title: 'Payment submitted for review',
+      message: `Your KSh ${amountKsh} M-Pesa Till payment is pending admin verification.`,
+      data: { paymentId: payment.id },
+    });
+  } catch (err: any) {
+    console.error('[payments/mpesa/till-submit] notification failed (non-critical):', err?.message || err);
+  }
+
   res.json({
     paymentId: payment.id,
     status: 'pending',
@@ -1739,6 +1763,10 @@ app.get('/api/payments/:id', requireAuth, async (req: Request, res: Response) =>
       createdAt: payment.createdAt,
       verifiedAt: payment.verifiedAt,
       mpesaReceipt: payment.status === 'success' ? payment.mpesaReceipt : null,
+      // Only populated when rejected — the access code itself is deliberately
+      // never returned from this endpoint; it only ever reaches the user via
+      // the in-app notification (and email, when configured).
+      rejectionReason: payment.status === 'rejected' ? payment.rejectionReason : null,
     },
   });
 });
@@ -1898,6 +1926,102 @@ app.post('/api/admin/payments/:paymentId/confirm', requireAuth, requireAdmin, ad
     console.error('[admin/payments/confirm] failed:', err?.message || err);
     await adminDb.logAudit({ adminId, action: 'PAYMENT_CONFIRMED', metadata: { paymentId }, result: 'failure' });
     res.status(503).json({ error: 'Unable to confirm payment right now.' });
+  }
+});
+
+// Admin support action: verify a manually-submitted Till payment for the
+// "Generate New Plan" gate. Distinct from /confirm above — this always
+// issues exactly one 7-day access code (never a direct entitlement), since
+// the code is what gets delivered via notification/email. Only ever applies
+// to payment_method='till_manual' && plan_type='meal_plan_generation' rows;
+// every other pending payment shape (STK-stuck-pending, Premium Till) keeps
+// using /confirm above unchanged. Atomic/idempotent: a second click (or a
+// concurrent request) never issues a second code — see adminDb.verifyTillPayment.
+app.post('/api/admin/payments/:paymentId/verify-till', requireAuth, requireAdmin, adminActionLimiter, async (req: Request, res: Response) => {
+  const adminId = getAuthenticatedUserId(req, res);
+  const { paymentId } = req.params;
+  try {
+    const result = await adminDb.verifyTillPayment(paymentId, adminId);
+    if (result.ok === false) {
+      const reason = result.reason;
+      await adminDb.logAudit({ adminId, action: 'TILL_PAYMENT_VERIFIED', metadata: { paymentId, reason }, result: 'failure' });
+      const status = reason === 'not_found' ? 404 : reason === 'wrong_method_or_plan' ? 400 : 409;
+      const error = reason === 'not_found' ? 'Payment not found'
+        : reason === 'wrong_method_or_plan' ? 'This action only applies to manually-submitted Till payments for a new meal-plan generation.'
+        : 'Payment is not in a pending state.';
+      return res.status(status).json({ error });
+    }
+    await adminDb.logAudit({
+      adminId, action: 'TILL_PAYMENT_VERIFIED', targetUserId: result.userId,
+      metadata: { paymentId, created: result.created }, result: 'success',
+    });
+    // Plaintext code only present on the first (created:true) response —
+    // never re-sent on a replay, since it no longer exists anywhere.
+    res.json({
+      success: true,
+      accessCodeId: result.accessCodeId,
+      code: result.created ? result.code : null,
+      expiresAt: result.expiresAt,
+      alreadyVerified: !result.created,
+    });
+  } catch (err: any) {
+    console.error('[admin/payments/verify-till] failed:', err?.message || err);
+    await adminDb.logAudit({ adminId, action: 'TILL_PAYMENT_VERIFIED', metadata: { paymentId }, result: 'failure' });
+    res.status(503).json({ error: 'Unable to verify payment right now.' });
+  }
+});
+
+// Admin support action: explicitly decline a manually-submitted Till payment
+// (e.g. the code doesn't match any real transaction). Same atomic/idempotent
+// guard as verify-till — a double-reject or reject-after-verify is a no-op,
+// never a silent overwrite.
+app.post('/api/admin/payments/:paymentId/reject', requireAuth, requireAdmin, adminActionLimiter, async (req: Request, res: Response) => {
+  const adminId = getAuthenticatedUserId(req, res);
+  const { paymentId } = req.params;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : '';
+  if (!reason) return res.status(400).json({ error: 'A rejection reason is required.' });
+  try {
+    const result = await adminDb.rejectTillPayment(paymentId, adminId, reason);
+    if (result.ok === false) {
+      const failReason = result.reason;
+      await adminDb.logAudit({ adminId, action: 'TILL_PAYMENT_REJECTED', metadata: { paymentId, reason: failReason }, result: 'failure' });
+      const status = failReason === 'not_found' ? 404 : 409;
+      return res.status(status).json({ error: failReason === 'not_found' ? 'Payment not found' : 'Payment is not in a pending state.' });
+    }
+    await adminDb.logAudit({ adminId, action: 'TILL_PAYMENT_REJECTED', targetUserId: result.userId, metadata: { paymentId, reason }, result: 'success' });
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error('[admin/payments/reject] failed:', err?.message || err);
+    await adminDb.logAudit({ adminId, action: 'TILL_PAYMENT_REJECTED', metadata: { paymentId }, result: 'failure' });
+    res.status(503).json({ error: 'Unable to reject payment right now.' });
+  }
+});
+
+// Admin support action: re-send the access-code email for an already-
+// verified Till payment. Never re-exposes the code to the admin themselves —
+// it goes straight to the user's registered email. See
+// adminDb.resendAccessCodeEmail for the resent-existing vs reissued-new
+// distinction the response's `mode` field reflects.
+app.post('/api/admin/payments/:paymentId/resend-code-email', requireAuth, requireAdmin, adminActionLimiter, emailResendLimiter, async (req: Request, res: Response) => {
+  const adminId = getAuthenticatedUserId(req, res);
+  const { paymentId } = req.params;
+  try {
+    const result = await adminDb.resendAccessCodeEmail(paymentId, adminId);
+    if (result.ok === false) {
+      const reason = result.reason;
+      await adminDb.logAudit({ adminId, action: 'ACCESS_CODE_EMAIL_RESENT', metadata: { paymentId, reason }, result: 'failure' });
+      const status = reason === 'not_found' ? 404 : 409;
+      const error = reason === 'not_found' ? 'Payment not found'
+        : reason === 'not_verified' ? 'This payment has not been verified yet.'
+        : 'This user has no email on file.';
+      return res.status(status).json({ error });
+    }
+    await adminDb.logAudit({ adminId, action: 'ACCESS_CODE_EMAIL_RESENT', metadata: { paymentId, mode: result.mode }, result: 'success' });
+    res.json({ success: true, mode: result.mode });
+  } catch (err: any) {
+    console.error('[admin/payments/resend-code-email] failed:', err?.message || err);
+    await adminDb.logAudit({ adminId, action: 'ACCESS_CODE_EMAIL_RESENT', metadata: { paymentId }, result: 'failure' });
+    res.status(503).json({ error: 'Unable to resend the code email right now.' });
   }
 });
 

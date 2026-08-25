@@ -66,11 +66,19 @@ interface AppContextType {
   // Budget Security & Private State
   isBudgetUnlocked: boolean;
   financialSummary: FinancialSummaryData | null;
+  // Raw editable budget (categories + planned amounts) — separate from the
+  // derived financialSummary.categoryBreakdown, which only ever shows a
+  // category once something (an expense, or this) has given it a planned
+  // amount. Needed so the category editor below has something to edit.
+  budget: UserBudget | null;
   unlockBudget: (pin: string) => Promise<boolean>;
   lockBudget: () => Promise<void>;
   setupBudgetPin: (pin: string, confirmPin?: string) => Promise<boolean>;
   refreshFinancialData: () => Promise<void>;
   saveMonthlyIncome: (monthlyIncomeKsh: number, incomeType?: UserBudget['incomeType']) => Promise<void>;
+  // Sets or edits one category's planned amount — creates the category if it
+  // doesn't exist yet in budget.categories (real users start with none).
+  saveCategoryBudget: (category: string, plannedAmountKsh: number) => Promise<void>;
 
   // Public Actions
   logWater: (amountMl: number) => Promise<void>;
@@ -117,6 +125,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Financial Security
   const [isBudgetUnlocked, setIsBudgetUnlocked] = useState<boolean>(false);
   const [financialSummary, setFinancialSummary] = useState<FinancialSummaryData | null>(null);
+  const [budget, setBudget] = useState<UserBudget | null>(null);
 
   const triggerConfetti = () => {
     try {
@@ -171,10 +180,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsBudgetUnlocked(true);
         const summary = await api.getFinancialSummary();
         setFinancialSummary(summary);
+        const { budget: b } = await api.getBudget().catch(() => ({ budget: null }));
+        setBudget(b);
       }
     } catch {
       setIsBudgetUnlocked(false);
       setFinancialSummary(null);
+      setBudget(null);
     }
   }, []);
 
@@ -192,6 +204,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsPinModalOpen(false);
         const summary = await api.getFinancialSummary();
         setFinancialSummary(summary);
+        const { budget: b } = await api.getBudget().catch(() => ({ budget: null }));
+        setBudget(b);
         return true;
       }
       return false;
@@ -207,6 +221,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } finally {
       setIsBudgetUnlocked(false);
       setFinancialSummary(null);
+      setBudget(null);
     }
   };
 
@@ -220,6 +235,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (user) setUser({ ...user, hasBudgetPin: true });
         const summary = await api.getFinancialSummary();
         setFinancialSummary(summary);
+        const { budget: b } = await api.getBudget().catch(() => ({ budget: null }));
+        setBudget(b);
         triggerConfetti();
         return true;
       }
@@ -234,6 +251,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const summary = await api.getFinancialSummary();
       setFinancialSummary(summary);
+      const { budget: b } = await api.getBudget().catch(() => ({ budget: null }));
+      setBudget(b);
     } catch (err: any) {
       if (err.budgetLocked) {
         await lockBudget();
@@ -255,6 +274,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         monthlyIncomeKsh,
         incomeType: incomeType || current?.incomeType || 'monthly',
       });
+      await refreshFinancialData();
+    } catch (err: any) {
+      if (err.budgetLocked) await lockBudget();
+      throw err;
+    }
+  };
+
+  // Fixed palette matching server/db.ts's demo-data categories, extended
+  // with the three ExpenseCategory values that had no assigned color yet
+  // (Shopping/Entertainment/Health) — used only when a category is being
+  // created here for the first time; an existing category keeps its stored color.
+  const CATEGORY_COLORS: Record<string, string> = {
+    Food: '#14532D', Rent: '#3B82F6', Transport: '#F59E0B', Bills: '#8B5CF6',
+    Shopping: '#EC4899', Entertainment: '#06B6D4', Health: '#DC2626',
+    Savings: '#10B981', Debt: '#EF4444', Other: '#6B7280',
+  };
+
+  // Sets or edits one category's planned amount. Real (non-demo) users start
+  // with an empty categories array — this is the only place that ever
+  // creates a new category, appending it if it doesn't exist yet rather than
+  // requiring it to already be there.
+  const saveCategoryBudget = async (category: string, plannedAmountKsh: number) => {
+    if (!isBudgetUnlocked) return;
+    try {
+      const { budget: current } = await api.getBudget();
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      const base = current || { id: '', userId: '', month: currentMonth, monthlyIncomeKsh: 0, incomeType: 'monthly' as const, categories: [], updatedAt: '' };
+      const existingIdx = base.categories.findIndex((c) => c.category === category);
+      const categories = existingIdx >= 0
+        ? base.categories.map((c, i) => (i === existingIdx ? { ...c, plannedAmountKsh } : c))
+        : [...base.categories, { category: category as any, plannedAmountKsh, color: CATEGORY_COLORS[category] || '#6B7280' }];
+      await api.updateBudget({ ...base, categories });
       await refreshFinancialData();
     } catch (err: any) {
       if (err.budgetLocked) await lockBudget();
@@ -411,11 +462,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsGeneratePlanModalOpen,
         isBudgetUnlocked,
         financialSummary,
+        budget,
         unlockBudget,
         lockBudget,
         setupBudgetPin,
         refreshFinancialData,
         saveMonthlyIncome,
+        saveCategoryBudget,
         logWater,
         toggleShoppingItem,
         swapMeal,

@@ -37,6 +37,7 @@ export const BudgetView: React.FC = () => {
     deleteExpense,
     household,
     saveMonthlyIncome,
+    saveCategoryBudget,
   } = useApp();
 
   const [activeSubTab, setActiveSubTab] = useState<'overview' | 'estimator' | 'expenses' | 'planner'>('overview');
@@ -44,6 +45,28 @@ export const BudgetView: React.FC = () => {
   const [isEditingIncome, setIsEditingIncome] = useState(false);
   const [incomeInput, setIncomeInput] = useState('');
   const [isSavingIncome, setIsSavingIncome] = useState(false);
+  const [editingCategory, setEditingCategory] = useState<string | null>(null);
+  const [categoryAmountInput, setCategoryAmountInput] = useState('');
+  const [isSavingCategory, setIsSavingCategory] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+
+  const ALL_CATEGORIES = ['Food', 'Rent', 'Transport', 'Bills', 'Shopping', 'Entertainment', 'Health', 'Savings', 'Debt', 'Other'];
+
+  const handleSaveCategory = async (category: string) => {
+    const amount = Number(categoryAmountInput);
+    if (!Number.isFinite(amount) || amount < 0) return;
+    setIsSavingCategory(true);
+    try {
+      await saveCategoryBudget(category, Math.round(amount));
+      setEditingCategory(null);
+      setNewCategoryName('');
+    } catch {
+      // refreshFinancialData/lockBudget inside saveCategoryBudget already
+      // handles a locked/expired session; nothing extra to do here.
+    } finally {
+      setIsSavingCategory(false);
+    }
+  };
 
   const handleSaveIncome = async () => {
     const amount = Number(incomeInput);
@@ -354,6 +377,20 @@ export const BudgetView: React.FC = () => {
                   ))}
                 </div>
               )}
+
+              {analysis.warnings && analysis.warnings.length > 0 && (
+                <div className="mt-4 pt-3 border-t border-current/10 space-y-1">
+                  <span className="text-[11px] font-bold uppercase tracking-wider block">
+                    Budget Warnings:
+                  </span>
+                  {analysis.warnings.map((w, idx) => (
+                    <p key={idx} className="text-xs font-medium flex items-center gap-1.5">
+                      <span>•</span>
+                      <span>{w}</span>
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -403,12 +440,39 @@ export const BudgetView: React.FC = () => {
                       <div className="flex-1 min-w-0 space-y-1.5">
                         <div className="flex items-center justify-between text-xs">
                           <span className="font-extrabold text-[#17201A] capitalize truncate">{catKey}</span>
-                          <div className="space-x-1.5 shrink-0 text-right">
-                            <span className="font-extrabold text-[#17201A] tabular-nums">
-                              KSh {spent.toLocaleString()}
-                            </span>
-                            <span className="text-[#66736A] tabular-nums">/ {planned.toLocaleString()}</span>
-                          </div>
+                          {editingCategory === catKey ? (
+                            <div className="flex items-center gap-1 shrink-0">
+                              <input
+                                type="number"
+                                min={0}
+                                step={500}
+                                autoFocus
+                                value={categoryAmountInput}
+                                onChange={(e) => setCategoryAmountInput(e.target.value)}
+                                className="w-20 px-1.5 py-0.5 bg-white border border-[#E8E5DD] rounded-lg text-xs font-bold text-[#17201A] focus:outline-none focus:ring-2 focus:ring-[#14532D]/30"
+                              />
+                              <button onClick={() => handleSaveCategory(catKey)} disabled={isSavingCategory} className="p-1 rounded-lg bg-[#14532D] text-white cursor-pointer disabled:opacity-50">
+                                <Check className="w-3 h-3" />
+                              </button>
+                              <button onClick={() => setEditingCategory(null)} className="p-1 rounded-lg border border-[#E8E5DD] cursor-pointer">
+                                <X className="w-3 h-3" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5 shrink-0 text-right">
+                              <span className="font-extrabold text-[#17201A] tabular-nums">
+                                KSh {spent.toLocaleString()}
+                              </span>
+                              <span className="text-[#66736A] tabular-nums">/ {planned.toLocaleString()}</span>
+                              <button
+                                onClick={() => { setEditingCategory(catKey); setCategoryAmountInput(String(planned || '')); }}
+                                className="p-1 text-[#66736A] hover:text-[#17201A] rounded-lg hover:bg-white cursor-pointer"
+                                title="Edit planned amount"
+                              >
+                                <Edit3 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
                         </div>
 
                         <div className="w-full bg-white h-2 rounded-full overflow-hidden border border-[#E8E5DD]">
@@ -431,6 +495,52 @@ export const BudgetView: React.FC = () => {
                   );
                 })}
             </div>
+
+            {/* Categories with no planned amount yet — real users start with
+                none, so this is the only way to give one a budget at all. */}
+            {(() => {
+              const existing = new Set(Object.keys(summary?.categoryBreakdown || {}));
+              const missing = ALL_CATEGORIES.filter((c) => !existing.has(c));
+              if (missing.length === 0) return null;
+              return (
+                <div className="mt-4 pt-4 border-t border-[#F1EFE8]">
+                  <p className="text-xs font-bold text-[#66736A] mb-2">Set a budget for another category:</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {editingCategory && missing.includes(editingCategory) ? (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-bold text-[#17201A]">{editingCategory}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          step={500}
+                          autoFocus
+                          placeholder="e.g. 5000"
+                          value={categoryAmountInput}
+                          onChange={(e) => setCategoryAmountInput(e.target.value)}
+                          className="w-24 px-2 py-1 bg-[#FAF8F2] border border-[#E8E5DD] rounded-lg text-xs font-bold focus:outline-none focus:ring-2 focus:ring-[#14532D]/30"
+                        />
+                        <button onClick={() => handleSaveCategory(editingCategory)} disabled={isSavingCategory || !categoryAmountInput} className="px-2.5 py-1 rounded-lg bg-[#14532D] text-white text-[10px] font-bold cursor-pointer disabled:opacity-50">
+                          {isSavingCategory ? 'Saving…' : 'Save'}
+                        </button>
+                        <button onClick={() => { setEditingCategory(null); setCategoryAmountInput(''); }} className="px-2.5 py-1 rounded-lg border border-[#E8E5DD] text-[10px] font-bold cursor-pointer">
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      missing.map((c) => (
+                        <button
+                          key={c}
+                          onClick={() => { setEditingCategory(c); setCategoryAmountInput(''); }}
+                          className="px-2.5 py-1.5 rounded-xl border border-dashed border-[#E8E5DD] text-[#66736A] hover:text-[#17201A] hover:border-[#14532D]/40 text-[11px] font-bold cursor-pointer"
+                        >
+                          + {c}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}

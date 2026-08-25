@@ -12,10 +12,11 @@
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
-import { paymentsDb } from './secure-db.js';
+import { paymentsDb, secureDb } from './secure-db.js';
 import { sha256 } from './secure-db.js';
 import { PREMIUM_PRICING } from './mpesa.js';
 import { db as jsonDb } from './db.js';
+import { sendEmail, buildAccessCodeEmail } from './email.js';
 
 let client: SupabaseClient | null = null;
 function db(): SupabaseClient {
@@ -216,6 +217,13 @@ export const adminDb = {
       household: household
         ? { id: household.id, name: household.name, memberCount: (household.household_members ?? []).length }
         : null,
+      // Light metadata only — never the notification's message/data, which
+      // for an access-code delivery notification contains the plaintext
+      // code. Admin support has a dedicated "Resend Code Email" action for
+      // that; it must never be readable directly off this endpoint.
+      recentNotifications: jsonDb.getNotifications(userId)
+        .slice(0, 10)
+        .map((n) => ({ id: n.id, title: n.title, type: n.type, isRead: n.isRead, createdAt: n.createdAt })),
     };
   },
 
@@ -349,23 +357,179 @@ export const adminDb = {
   // trigger on meal_plan_access_codes (see migration 0003), not by this
   // function — this function never sets expires_at itself.
   async issueAccessCode(userId: string, adminId: string, description?: string) {
-    const code = generateAccessCode();
-    const codeHash = sha256(code.trim().toUpperCase());
-    const { data, error } = await db()
-      .from('meal_plan_access_codes')
-      .insert({
-        code_hash: codeHash, user_id: userId, active: true, max_uses: 1, used_count: 0,
-        description: (description && description.trim().slice(0, 200)) || `Issued by admin support (${adminId})`,
-      })
-      .select('id, expires_at, created_at')
-      .single();
-    if (error || !data) throw new Error(`failed to issue access code: ${error?.message}`);
-    return { id: data.id as string, code, expiresAt: (data.expires_at as string) ?? null, createdAt: data.created_at as string };
+    return insertAccessCode({
+      userId,
+      description: (description && description.trim().slice(0, 200)) || `Issued by admin support (${adminId})`,
+    });
   },
 
   async cancelAccessCode(id: string): Promise<boolean> {
     const { data, error } = await db().from('meal_plan_access_codes').update({ active: false }).eq('id', id).select('id').maybeSingle();
     return !error && !!data;
+  },
+
+  // ── Till payment verification → access code ─────────────────────────────
+  // Distinct from confirmPayment above (unchanged — still used for
+  // STK-stuck-pending and Premium Till payments, which grant a subscription
+  // or entitlement directly). This path is specific to a manually-submitted
+  // Till payment for the "Generate New Plan" gate: verification issues
+  // exactly one 7-day access code instead of unlocking generation directly,
+  // since the code is the thing that gets delivered via notification/email
+  // (see server.ts's /api/admin/payments/:paymentId/verify-till).
+  async verifyTillPayment(paymentId: string, adminId: string): Promise<
+    | { ok: true; created: true; accessCodeId: string; code: string; expiresAt: string | null; userId: string; amountKsh: number }
+    | { ok: true; created: false; accessCodeId: string; expiresAt: string | null; userId: string }
+    | { ok: false; reason: 'not_found' | 'not_pending' | 'wrong_method_or_plan' | 'concurrent_transition' }
+  > {
+    const payment = await paymentsDb.getPaymentById(paymentId);
+    if (!payment) return { ok: false, reason: 'not_found' };
+    if (payment.paymentMethod !== 'till_manual' || payment.planType !== 'meal_plan_generation') {
+      return { ok: false, reason: 'wrong_method_or_plan' };
+    }
+
+    if (payment.status !== 'pending') {
+      // Idempotent replay: this payment was already verified (or is in some
+      // other terminal state). Never issue a second code — look up the one
+      // already linked via the unique payment_id index, if any.
+      const { data: existing } = await db()
+        .from('meal_plan_access_codes')
+        .select('id, expires_at')
+        .eq('payment_id', paymentId)
+        .maybeSingle();
+      if (existing) {
+        return { ok: true, created: false, accessCodeId: existing.id as string, expiresAt: (existing.expires_at as string) ?? null, userId: payment.userId };
+      }
+      return { ok: false, reason: 'not_pending' };
+    }
+
+    const updated = await paymentsDb.transitionPayment(paymentId, 'pending', {
+      status: 'success',
+      verifiedAt: new Date().toISOString(),
+      verifiedBy: adminId,
+      resultDesc: 'Till payment manually verified by admin',
+    });
+    if (!updated) return { ok: false, reason: 'concurrent_transition' };
+
+    const issued = await insertAccessCode({
+      userId: payment.userId,
+      paymentId: payment.id,
+      description: `Till payment verified by admin (${adminId})`,
+    });
+
+    try {
+      jsonDb.addNotification({
+        userId: payment.userId,
+        type: 'system',
+        title: 'Payment verified — your MLO WANGU access code is ready',
+        message: `Your KSh ${payment.amountKsh} payment was verified. Your access code: ${issued.code}. Valid for 7 days.`,
+        data: { accessCode: issued.code, paymentId: payment.id, expiresAt: issued.expiresAt },
+      });
+    } catch (err: any) {
+      console.error('[admin/payments/verify-till] notification failed (non-critical):', err?.message || err);
+    }
+
+    await deliverAccessCodeEmail({ userId: payment.userId, paymentId: payment.id, code: issued.code, expiresAt: issued.expiresAt, emailType: 'access_code_verified' });
+
+    return { ok: true, created: true, accessCodeId: issued.id, code: issued.code, expiresAt: issued.expiresAt, userId: payment.userId, amountKsh: payment.amountKsh };
+  },
+
+  async rejectTillPayment(paymentId: string, adminId: string, reason: string): Promise<
+    | { ok: true; userId: string }
+    | { ok: false; reason: 'not_found' | 'not_pending' | 'concurrent_transition' }
+  > {
+    const payment = await paymentsDb.getPaymentById(paymentId);
+    if (!payment) return { ok: false, reason: 'not_found' };
+    if (payment.status !== 'pending') return { ok: false, reason: 'not_pending' };
+
+    const updated = await paymentsDb.transitionPayment(paymentId, 'pending', {
+      status: 'rejected',
+      verifiedAt: new Date().toISOString(),
+      verifiedBy: adminId,
+      rejectionReason: reason,
+    });
+    if (!updated) return { ok: false, reason: 'concurrent_transition' };
+
+    try {
+      jsonDb.addNotification({
+        userId: payment.userId,
+        type: 'system',
+        title: 'Payment could not be verified',
+        message: reason,
+        data: { paymentId: payment.id, rejectionReason: reason },
+      });
+    } catch (err: any) {
+      console.error('[admin/payments/reject] notification failed (non-critical):', err?.message || err);
+    }
+
+    return { ok: true, userId: payment.userId };
+  },
+
+  // Resends the access-code email for an already-verified Till payment.
+  // Prefers recovering the exact original code from the user's own
+  // notification history (the only place the plaintext is ever persisted,
+  // by design — see verifyTillPayment above). That JSON-file-backed
+  // notification store is not guaranteed durable across this app's
+  // serverless deployment, so if the original notification can't be found,
+  // this does not error — it cancels the old (now-unrecoverable) code and
+  // issues a fresh one for the same payment/user, and the caller must
+  // surface which of the two happened.
+  async resendAccessCodeEmail(paymentId: string, adminId: string): Promise<
+    | { ok: true; mode: 'resent_existing' | 'reissued_new'; recipientEmail: string }
+    | { ok: false; reason: 'not_found' | 'not_verified' | 'no_email' }
+  > {
+    const payment = await paymentsDb.getPaymentById(paymentId);
+    if (!payment) return { ok: false, reason: 'not_found' };
+    if (payment.status !== 'success' || payment.paymentMethod !== 'till_manual') {
+      return { ok: false, reason: 'not_verified' };
+    }
+
+    const user = await secureDb.getUser(payment.userId);
+    const recipientEmail = (user as any)?.email as string | undefined;
+    if (!recipientEmail) return { ok: false, reason: 'no_email' };
+
+    const notifications = jsonDb.getNotifications(payment.userId);
+    const original = notifications.find((n) => n.data?.paymentId === paymentId && n.data?.accessCode);
+
+    if (original?.data?.accessCode) {
+      await deliverAccessCodeEmail({
+        userId: payment.userId, paymentId, code: original.data.accessCode,
+        expiresAt: original.data.expiresAt ?? null, emailType: 'access_code_resend',
+      });
+      return { ok: true, mode: 'resent_existing', recipientEmail };
+    }
+
+    // Fallback: the original notification is gone — cancel the old code
+    // (nulling its payment_id first so the unique partial index doesn't
+    // collide with the new row) and issue a fresh one for the same payment.
+    const { data: existingCode } = await db()
+      .from('meal_plan_access_codes')
+      .select('id')
+      .eq('payment_id', paymentId)
+      .maybeSingle();
+    if (existingCode) {
+      await db().from('meal_plan_access_codes').update({ active: false, payment_id: null }).eq('id', existingCode.id as string);
+    }
+
+    const reissued = await insertAccessCode({
+      userId: payment.userId, paymentId, description: `Re-issued by admin support (${adminId}) — original code unrecoverable`,
+    });
+
+    try {
+      jsonDb.addNotification({
+        userId: payment.userId,
+        type: 'system',
+        title: 'A new MLO WANGU access code was issued',
+        message: `Your previous access code could not be resent, so a new one was issued: ${reissued.code}. Valid for 7 days.`,
+        data: { accessCode: reissued.code, paymentId, expiresAt: reissued.expiresAt },
+      });
+    } catch (err: any) {
+      console.error('[admin/payments/resend-code-email] notification failed (non-critical):', err?.message || err);
+    }
+
+    await deliverAccessCodeEmail({
+      userId: payment.userId, paymentId, code: reissued.code, expiresAt: reissued.expiresAt, emailType: 'access_code_resend',
+    });
+    return { ok: true, mode: 'reissued_new', recipientEmail };
   },
 
   // ── Support Notes ────────────────────────────────────────────────────────
@@ -466,6 +630,52 @@ export const adminDb = {
     return { entries: data ?? [], total: count ?? 0, page: p, pageSize: ps };
   },
 };
+
+// Shared by issueAccessCode (existing manual-issue support action) and
+// verifyTillPayment/resendAccessCodeEmail's reissue path (new). Never sets
+// expires_at itself — the DB trigger (migration 0003) remains the sole
+// source of the 7-day ceiling, for every issuance path alike.
+async function insertAccessCode(opts: { userId: string; paymentId?: string; description: string }) {
+  const code = generateAccessCode();
+  const codeHash = sha256(code.trim().toUpperCase());
+  const { data, error } = await db()
+    .from('meal_plan_access_codes')
+    .insert({
+      code_hash: codeHash, user_id: opts.userId, active: true, max_uses: 1, used_count: 0,
+      payment_id: opts.paymentId ?? null,
+      description: opts.description,
+    })
+    .select('id, expires_at, created_at')
+    .single();
+  if (error || !data) throw new Error(`failed to issue access code: ${error?.message}`);
+  return { id: data.id as string, code, expiresAt: (data.expires_at as string) ?? null, createdAt: data.created_at as string };
+}
+
+// Best-effort email delivery + email_log write. Never throws — a failed or
+// unconfigured send is logged and returned to the caller as informational
+// only; it must never roll back a verified payment or a just-issued code.
+async function deliverAccessCodeEmail(opts: { userId: string; paymentId: string; code: string; expiresAt: string | null; emailType: string }): Promise<void> {
+  const user = await secureDb.getUser(opts.userId);
+  const recipient = (user as any)?.email as string | undefined;
+
+  if (!recipient) {
+    await db().from('email_log').insert({
+      user_id: opts.userId, recipient: '(no email on file)', email_type: opts.emailType,
+      status: 'failed', related_payment_id: opts.paymentId, error: 'User has no email on file',
+    });
+    return;
+  }
+
+  const { subject, html, text } = buildAccessCodeEmail({ code: opts.code, expiresAt: opts.expiresAt });
+  const result = await sendEmail({ to: recipient, subject, html, text });
+
+  await db().from('email_log').insert({
+    user_id: opts.userId, recipient, email_type: opts.emailType,
+    status: result.ok ? 'sent' : (result.error === 'not_configured' ? 'not_configured' : 'failed'),
+    related_payment_id: opts.paymentId,
+    error: result.ok ? null : result.error,
+  });
+}
 
 function computeAccessCodeStatus(row: { active: boolean; expires_at: string; used_count: number; max_uses: number }): AccessCodeStatus {
   if (!row.active) return 'CANCELLED';
