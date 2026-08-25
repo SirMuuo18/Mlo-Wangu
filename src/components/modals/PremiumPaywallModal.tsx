@@ -31,7 +31,7 @@ export const PremiumPaywallModal: React.FC = () => {
   // Premium only ever activates on the server, from the real Daraja callback.
   // This polls the server's own recorded payment status — it never assumes
   // success on its own.
-  const pollPaymentStatus = (paymentId: string) => {
+  const pollPaymentStatus = (paymentId: string, opts?: { noTimeout?: boolean }) => {
     const startedAt = Date.now();
     const poll = async () => {
       try {
@@ -46,12 +46,12 @@ export const PremiumPaywallModal: React.FC = () => {
           setStep('failed');
           return;
         }
-        if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        if (!opts?.noTimeout && Date.now() - startedAt > POLL_TIMEOUT_MS) {
           setStep('failed');
           return;
         }
       } catch {
-        if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        if (!opts?.noTimeout && Date.now() - startedAt > POLL_TIMEOUT_MS) {
           setStep('failed');
           return;
         }
@@ -61,6 +61,9 @@ export const PremiumPaywallModal: React.FC = () => {
     poll();
   };
 
+  // Currently unused — its only call site (the STK "PAY WITH M-PESA" form)
+  // is hidden below while the Daraja app is pending. Kept intact so STK can
+  // be re-enabled later without rebuilding this handler.
   const handleTriggerMpesa = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
@@ -92,17 +95,20 @@ export const PremiumPaywallModal: React.FC = () => {
     }
   };
 
-  // Never activates Premium itself — only submits the code for an admin to
-  // verify. Premium activates once confirmed, same as the STK path, just
-  // without polling (there's nothing to poll: success isn't determined
-  // client-side, or even on any fixed timeline).
+  // Never activates Premium itself — only submits the message for an admin
+  // to verify. Once confirmed, the same poll used for the STK path picks it
+  // up and refreshes the user's own Premium status immediately — no manual
+  // reload needed. No fixed timeout here: an admin review can reasonably
+  // take longer than an instant STK push, so this polls indefinitely while
+  // the modal is open rather than giving up after 90s.
   const handleSubmitTill = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setError('');
     try {
-      await api.submitTillPayment(selectedPlan, phone, mpesaMessage);
+      const res = await api.submitTillPayment(selectedPlan, phone, mpesaMessage);
       setStep('till_submitted');
+      pollPaymentStatus(res.paymentId, { noTimeout: true });
     } catch (err: any) {
       setError(err.message || 'Could not submit your payment for verification.');
     } finally {
@@ -180,42 +186,22 @@ export const PremiumPaywallModal: React.FC = () => {
               </div>
             </div>
 
-            {/* Form */}
-            <form onSubmit={handleTriggerMpesa} className="space-y-3">
-              <div>
-                <label className="text-xs font-bold text-[#17201A] block mb-1">M-Pesa Phone Number</label>
-                <div className="relative">
-                  <Smartphone className="w-4 h-4 text-[#66736A] absolute left-3 top-3" />
-                  <input
-                    type="tel"
-                    required
-                    placeholder="07XX XXX XXX"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2.5 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#14532D]"
-                  />
-                </div>
-              </div>
-
+            {/* STK Push is temporarily hidden while the Daraja app is
+                pending — Till/Paybill is the only live payment path for
+                now. Re-add the phone-number form + "PAY WITH M-PESA" STK
+                button here once Daraja is confirmed working. */}
+            <div className="space-y-3">
               {error && <p className="text-[11px] text-red-600 font-semibold">{error}</p>}
-              <button
-                type="submit"
-                disabled={isLoading}
-                className="w-full py-3 px-4 bg-[#25D366] hover:bg-[#20ba5a] text-white font-extrabold text-xs rounded-xl transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-              >
-                <Smartphone className="w-4 h-4" />
-                {isLoading ? 'Initiating M-Pesa...' : `PAY WITH M-PESA — KSh ${selectedPlan === 'weekly' ? 50 : 150}`}
-              </button>
               <button
                 type="button"
                 onClick={handleOpenTill}
                 disabled={isLoading}
-                className="w-full py-2.5 px-4 bg-[#FAF8F2] hover:bg-[#F1EFE8] text-[#17201A] font-extrabold text-xs rounded-xl transition-all border border-[#E8E5DD] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                className="w-full py-3 px-4 bg-[#25D366] hover:bg-[#20ba5a] text-white font-extrabold text-xs rounded-xl transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 <Store className="w-4 h-4" />
                 Pay via M-Pesa Till{tillNumber ? ` — ${tillNumber}` : ''}
               </button>
-            </form>
+            </div>
           </div>
         )}
 

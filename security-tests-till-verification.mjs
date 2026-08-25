@@ -141,7 +141,11 @@ try {
   // would otherwise collide with a real route-level submission here.
   console.log('── Till-submit: paste the FULL M-Pesa confirmation SMS, code extracted server-side ──');
   {
-    const realisticCode = 'QGH7XYZ123';
+    // Unique per run — mpesa_receipt has a real DB-level uniqueness
+    // constraint, so a fixed code here would collide with itself on repeat
+    // runs against the same live database. 'Q' + digits guarantees the
+    // extractor's shape requirement (mixed letter+digit, 8-12 chars).
+    const realisticCode = `Q${String(Date.now()).slice(-9)}`;
     const fullMessage = `${realisticCode} Confirmed. Ksh50.00 paid to MLO WANGU. on 25/8/26 at 10:30 AM. New M-PESA balance is Ksh1,234.00. Transaction cost, Ksh0.00.Amount you can transact within the day is 499,000.00. Pay Bill and Buy Goods transactions are free for amounts less than Ksh100.`;
 
     const noMessage = await req('/api/payments/mpesa/till-submit', {
@@ -390,6 +394,45 @@ try {
     const warnings = analysis.body?.analysis?.warnings || [];
     assert('warnings array includes a Transport warning at ~90% used', warnings.some((w) => /Transport/i.test(w) && /%/.test(w)), JSON.stringify(warnings));
     assert('Existing Food-specific fields are still present and unchanged in shape', typeof analysis.body?.analysis?.alertMessage === 'string' && typeof analysis.body?.analysis?.alertType === 'string', JSON.stringify(analysis.body?.analysis));
+  }
+
+  // ── PREMIUM: weekly-plan generation is included, no separate gate ───────
+  console.log('── [MOCK TEST] Active Premium bypasses the meal-plan-generation entitlement gate ──');
+  {
+    // Before any subscription exists: otherId still needs to pay, same as everyone else.
+    const before = await req('/api/meal-plans/generation/entitlement-status', { headers: { Cookie: otherCookie } });
+    assert('Non-premium user: entitlement-status is false before any subscription', before.body?.hasEntitlement === false, JSON.stringify(before.body));
+
+    const genBefore = await req('/api/meal-plans/generate', { method: 'POST', headers: { Cookie: otherCookie } });
+    assert('Non-premium user: generate still requires payment → 402', genBefore.status === 402 && genBefore.body?.code === 'PAYMENT_REQUIRED', `got ${genBefore.status} ${JSON.stringify(genBefore.body)}`);
+
+    // Seed an active subscription directly (stands in for a real admin-confirmed STK/Till payment).
+    const { error: subErr } = await admin.from('subscriptions').insert({
+      user_id: otherId, plan_type: 'monthly', price_ksh: 150, status: 'active',
+      start_date: new Date().toISOString(), end_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      mpesa_receipt: `PREM${Date.now()}`,
+    });
+    if (subErr) throw new Error(`seed subscription failed: ${subErr.message}`);
+
+    const after = await req('/api/meal-plans/generation/entitlement-status', { headers: { Cookie: otherCookie } });
+    assert('Active Premium: entitlement-status reports hasEntitlement=true with no purchase', after.body?.hasEntitlement === true, JSON.stringify(after.body));
+
+    const genAfter = await req('/api/meal-plans/generate', { method: 'POST', headers: { Cookie: otherCookie } });
+    assert('Active Premium: generate succeeds directly, no entitlement/access-code needed → 200', genAfter.status === 200, `got ${genAfter.status} ${JSON.stringify(genAfter.body)}`);
+
+    // Confirm no entitlement row was consumed/created by this — Premium
+    // bypasses the entitlement mechanism entirely, it doesn't quietly use one.
+    const { data: ents } = await admin.from('meal_plan_entitlements').select('id').eq('user_id', otherId);
+    assert('Premium generation did not create or consume any meal_plan_entitlements row', (ents || []).length === 0, JSON.stringify(ents));
+
+    // Can generate again immediately — Premium is an ongoing benefit, not a one-shot.
+    const genAgain = await req('/api/meal-plans/generate', { method: 'POST', headers: { Cookie: otherCookie } });
+    assert('Active Premium: can generate a second time immediately, still no gate', genAgain.status === 200, `got ${genAgain.status}`);
+
+    // Expired subscription must NOT bypass the gate.
+    await admin.from('subscriptions').update({ end_date: new Date(Date.now() - 1000).toISOString() }).eq('user_id', otherId);
+    const genExpired = await req('/api/meal-plans/generate', { method: 'POST', headers: { Cookie: otherCookie } });
+    assert('Expired subscription: gate re-applies, generate requires payment again → 402', genExpired.status === 402, `got ${genExpired.status}`);
   }
 
 } finally {

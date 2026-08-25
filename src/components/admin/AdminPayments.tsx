@@ -29,6 +29,7 @@ export const AdminPayments: React.FC = () => {
   const [revealedCode, setRevealedCode] = useState<{ paymentId: string; code: string; expiresAt: string | null } | null>(null);
   const [copied, setCopied] = useState(false);
   const [note, setNote] = useState<{ paymentId: string; text: string } | null>(null);
+  const [expandedSmsId, setExpandedSmsId] = useState<string | null>(null);
 
   const load = useCallback(async (s: string, p: number) => {
     try {
@@ -147,7 +148,14 @@ export const AdminPayments: React.FC = () => {
                   <td className="py-2.5 px-3 text-[#66736A]">{formatDate(p.createdAt)}</td>
                   <td className="py-2.5 px-3 font-mono text-[10px]">
                     {p.mpesaReceipt || '—'}
-                    {p.mpesaRawMessage && <span className="text-[#66736A] ml-1" title={p.mpesaRawMessage}>(full SMS ⓘ)</span>}
+                    {p.mpesaRawMessage && (
+                      <button
+                        onClick={() => setExpandedSmsId(expandedSmsId === p.id ? null : p.id)}
+                        className="ml-1.5 text-[#172554] underline decoration-dotted font-sans font-semibold cursor-pointer"
+                      >
+                        {expandedSmsId === p.id ? 'hide SMS' : 'view SMS'}
+                      </button>
+                    )}
                   </td>
                   <td className="py-2.5 px-3 text-right">
                     {p.status === 'pending' && isTillGeneration(p) && (
@@ -229,6 +237,16 @@ export const AdminPayments: React.FC = () => {
                   <tr>
                     <td colSpan={8} className="px-3 pb-3">
                       <p className="text-[10px] text-[#66736A] italic">{note.text}</p>
+                    </td>
+                  </tr>
+                )}
+                {expandedSmsId === p.id && p.mpesaRawMessage && (
+                  <tr>
+                    <td colSpan={8} className="px-3 pb-3">
+                      <div className="p-3 rounded-lg bg-[#FAF8F2] border border-[#E8E5DD]">
+                        <p className="text-[10px] text-[#66736A] uppercase font-bold mb-1">Full M-Pesa confirmation SMS</p>
+                        <p className="text-xs text-[#17201A] whitespace-pre-wrap break-words">{p.mpesaRawMessage}</p>
+                      </div>
                     </td>
                   </tr>
                 )}

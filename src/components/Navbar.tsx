@@ -30,9 +30,17 @@ export const Navbar: React.FC = () => {
             <div className="flex items-center gap-2">
               <span className="font-extrabold text-xl tracking-tight text-[#14532D]">Mlo Wangu</span>
               {user?.isPremium && (
-                <span className="bg-[#FEF3C7] text-[#92400E] text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide border border-[#FDE68A] flex items-center gap-1">
+                <span
+                  className="bg-[#FEF3C7] text-[#92400E] text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide border border-[#FDE68A] flex items-center gap-1"
+                  title={user.premiumExpiry ? `Premium until ${new Date(user.premiumExpiry).toLocaleDateString('en-KE', { day: 'numeric', month: 'long', year: 'numeric' })}` : undefined}
+                >
                   <ShieldCheck className="w-3 h-3 text-[#D97706]" />
                   Premium
+                  {user.premiumExpiry && (
+                    <span className="font-semibold normal-case tracking-normal opacity-80">
+                      · until {new Date(user.premiumExpiry).toLocaleDateString('en-KE', { day: 'numeric', month: 'short' })}
+                    </span>
+                  )}
                 </span>
               )}
             </div>

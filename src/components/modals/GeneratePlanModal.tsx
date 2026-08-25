@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
-import { X, Sparkles, Smartphone, KeyRound, CheckCircle2, ChefHat, Store, Clock3 } from 'lucide-react';
+import { X, Smartphone, KeyRound, CheckCircle2, ChefHat, Store, Clock3 } from 'lucide-react';
 import { api } from '../../services/api';
 
 const POLL_INTERVAL_MS = 2500;
@@ -112,6 +112,9 @@ export const GeneratePlanModal: React.FC = () => {
     poll();
   };
 
+  // Currently unused — its only entry point (the "Pay KSh {PRICE_KSH} with
+  // M-Pesa" STK button) is hidden below while the Daraja app is pending.
+  // Kept intact so STK can be re-enabled later without rebuilding this.
   const handlePay = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
@@ -194,7 +197,7 @@ export const GeneratePlanModal: React.FC = () => {
           <div>
             <div className="text-center">
               <div className="w-12 h-12 rounded-2xl bg-[#14532D]/10 text-[#14532D] border border-[#14532D]/20 flex items-center justify-center mx-auto mb-3">
-                <Sparkles className="w-6 h-6 text-[#14532D]" />
+                <ChefHat className="w-6 h-6 text-[#14532D]" />
               </div>
               <h3 className="text-xl font-extrabold text-[#17201A]">Generate a New Plan</h3>
               <p className="text-xs text-[#66736A] mt-1 max-w-xs mx-auto">
@@ -204,17 +207,14 @@ export const GeneratePlanModal: React.FC = () => {
             </div>
 
             <div className="space-y-2.5 mt-5">
-              <button
-                onClick={() => { setError(''); setStep('phone'); }}
-                className="w-full py-3 px-4 bg-[#25D366] hover:bg-[#20ba5a] text-white font-extrabold text-xs rounded-xl transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <Smartphone className="w-4 h-4" />
-                Pay KSh {PRICE_KSH} with M-Pesa
-              </button>
+              {/* STK Push is temporarily hidden while the Daraja app is
+                  pending — Till/Paybill is the only live payment path for
+                  now. Re-add the "Pay KSh {PRICE_KSH} with M-Pesa" STK
+                  button here once Daraja is confirmed working. */}
               <button
                 onClick={handleOpenTill}
                 disabled={isLoading}
-                className="w-full py-3 px-4 bg-[#FAF8F2] hover:bg-[#F1EFE8] text-[#17201A] font-extrabold text-xs rounded-xl transition-all border border-[#E8E5DD] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                className="w-full py-3 px-4 bg-[#25D366] hover:bg-[#20ba5a] text-white font-extrabold text-xs rounded-xl transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 <Store className="w-4 h-4" />
                 Pay via M-Pesa Till{tillNumber ? ` — ${tillNumber}` : ''}

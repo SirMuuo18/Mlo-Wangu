@@ -15,6 +15,7 @@ export const AdminUserDetail: React.FC<{ userId: string; onBack: () => void }> =
   const [issueDescription, setIssueDescription] = useState('');
   const [issueBusy, setIssueBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [expandedSmsId, setExpandedSmsId] = useState<string | null>(null);
 
   const [noteIssue, setNoteIssue] = useState('');
   const [noteAction, setNoteAction] = useState('');
@@ -232,24 +233,43 @@ export const AdminUserDetail: React.FC<{ userId: string; onBack: () => void }> =
                     <tr><td colSpan={7} className="py-3 px-2 text-[#66736A]">No payments on record.</td></tr>
                   )}
                   {detail.payments.map((p) => (
-                    <tr key={p.id}>
-                      <td className="py-2 px-2 font-bold">{formatKsh(p.amountKsh)}</td>
-                      <td className="py-2 px-2 capitalize">{p.planType.replace(/_/g, ' ')}</td>
-                      <td className="py-2 px-2 text-[10px]">{p.paymentMethod === 'till_manual' ? 'Till' : 'STK Push'}</td>
-                      <td className="py-2 px-2"><StatusBadge status={p.status} /></td>
-                      <td className="py-2 px-2">{formatDate(p.createdAt)}</td>
-                      <td className="py-2 px-2 font-mono text-[10px]">
-                        {p.mpesaReceipt || '—'}
-                        {p.mpesaRawMessage && <span className="text-[#66736A] ml-1" title={p.mpesaRawMessage}>(full SMS ⓘ)</span>}
-                      </td>
-                      <td className="py-2 px-2 text-right">
-                        {p.status === 'pending' && (
-                          <button onClick={() => handleConfirmPayment(p.id)} className="px-2.5 py-1 rounded-lg bg-[#14532D] text-white text-[10px] font-bold cursor-pointer">
-                            Confirm Payment
-                          </button>
-                        )}
-                      </td>
-                    </tr>
+                    <React.Fragment key={p.id}>
+                      <tr>
+                        <td className="py-2 px-2 font-bold">{formatKsh(p.amountKsh)}</td>
+                        <td className="py-2 px-2 capitalize">{p.planType.replace(/_/g, ' ')}</td>
+                        <td className="py-2 px-2 text-[10px]">{p.paymentMethod === 'till_manual' ? 'Till' : 'STK Push'}</td>
+                        <td className="py-2 px-2"><StatusBadge status={p.status} /></td>
+                        <td className="py-2 px-2">{formatDate(p.createdAt)}</td>
+                        <td className="py-2 px-2 font-mono text-[10px]">
+                          {p.mpesaReceipt || '—'}
+                          {p.mpesaRawMessage && (
+                            <button
+                              onClick={() => setExpandedSmsId(expandedSmsId === p.id ? null : p.id)}
+                              className="ml-1.5 text-[#172554] underline decoration-dotted font-sans font-semibold cursor-pointer"
+                            >
+                              {expandedSmsId === p.id ? 'hide SMS' : 'view SMS'}
+                            </button>
+                          )}
+                        </td>
+                        <td className="py-2 px-2 text-right">
+                          {p.status === 'pending' && (
+                            <button onClick={() => handleConfirmPayment(p.id)} className="px-2.5 py-1 rounded-lg bg-[#14532D] text-white text-[10px] font-bold cursor-pointer">
+                              Confirm Payment
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                      {expandedSmsId === p.id && p.mpesaRawMessage && (
+                        <tr>
+                          <td colSpan={7} className="px-2 pb-3">
+                            <div className="p-3 rounded-lg bg-[#FAF8F2] border border-[#E8E5DD]">
+                              <p className="text-[10px] text-[#66736A] uppercase font-bold mb-1">Full M-Pesa confirmation SMS</p>
+                              <p className="text-xs text-[#17201A] whitespace-pre-wrap break-words">{p.mpesaRawMessage}</p>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>

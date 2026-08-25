@@ -208,6 +208,23 @@ function getAuthenticatedUserId(_req: Request, res: Response): string {
   return res.locals.userId as string;
 }
 
+// Same "active" computation /api/subscription/status already uses — the
+// subscriptions table + its own end_date is the authority, not the
+// profiles.is_premium/premium_expiry mirror columns (which exist for fast
+// display on /api/auth/me but are never the thing gating access). Weekly-
+// plan generation is included in Premium: a Premium subscriber never needs
+// a separate entitlement/access code to generate a new plan. Fails closed
+// (false) on any lookup error.
+async function isUserPremium(userId: string): Promise<boolean> {
+  try {
+    const sub = await paymentsDb.getLatestSubscription(userId);
+    return !!(sub && sub.status === 'active' && sub.endDate && new Date(sub.endDate).getTime() > Date.now());
+  } catch (err: any) {
+    console.error('[isUserPremium] lookup failed, failing closed:', err?.message || err);
+    return false;
+  }
+}
+
 // Parse a named cookie from the request without cookie-parser.
 function getCookie(req: Request, name: string): string | undefined {
   const header = req.headers.cookie || '';
@@ -776,6 +793,13 @@ app.put('/api/meal-plans/current', requireAuth, (req: Request, res: Response) =>
 // unaffected by this gate.
 app.post('/api/meal-plans/generate', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
+
+  // Weekly plan generation is included in Premium — an active subscriber
+  // never needs an entitlement/access code, checked fresh on every request
+  // (never trusted from the client, and never cached).
+  if (await isUserPremium(userId)) {
+    return generateAndSaveMealPlan(userId, res);
+  }
 
   // Fail closed: any error while checking/claiming falls through to
   // PAYMENT_REQUIRED rather than ever allowing an unauthorized generation.
@@ -1517,8 +1541,11 @@ app.post('/api/payments/mpesa/stk-push', requireAuth, stkPushLimiter, async (req
 app.get('/api/meal-plans/generation/entitlement-status', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   try {
-    const entitlement = await paymentsDb.getUnusedEntitlement(userId);
-    res.json({ hasEntitlement: !!entitlement, priceKsh: MEAL_PLAN_GENERATION_PRICE_KSH });
+    const [entitlement, premium] = await Promise.all([
+      paymentsDb.getUnusedEntitlement(userId),
+      isUserPremium(userId),
+    ]);
+    res.json({ hasEntitlement: !!entitlement || premium, priceKsh: MEAL_PLAN_GENERATION_PRICE_KSH });
   } catch (err: any) {
     console.error('[meal-plan-gate] entitlement-status error:', err?.message || err);
     res.json({ hasEntitlement: false, priceKsh: MEAL_PLAN_GENERATION_PRICE_KSH }); // fail closed
