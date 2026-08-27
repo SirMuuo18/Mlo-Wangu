@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { Lock, Unlock, Bell, ShieldCheck, User, X, Check, Droplet, Utensils, Bot, KeyRound } from 'lucide-react';
+import { Lock, Unlock, Bell, ShieldCheck, User, X, Check, Droplet, Utensils, Bot, KeyRound, Heart, HelpCircle, LifeBuoy, Settings, AlarmClock } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
   const {
@@ -12,6 +12,7 @@ export const Navbar: React.FC = () => {
     setIsPremiumModalOpen,
     household,
     user,
+    isProfileLoading,
     notifications,
     unreadNotifsCount,
     markNotificationAsRead,
@@ -201,6 +202,18 @@ export const Navbar: React.FC = () => {
                     ))
                   )}
                 </div>
+
+                <div className="pt-2 mt-1 border-t border-[#F1EFE8]">
+                  <button
+                    onClick={() => {
+                      setActiveTab('notifications');
+                      setIsNotifOpen(false);
+                    }}
+                    className="w-full text-center px-3 py-2 text-xs font-bold text-[#14532D] hover:bg-[#FAF8F2] rounded-xl"
+                  >
+                    View all notifications
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -211,24 +224,63 @@ export const Navbar: React.FC = () => {
               onClick={() => setIsProfileOpen(!isProfileOpen)}
               className="w-9 h-9 rounded-xl bg-[#14532D]/10 hover:bg-[#14532D]/20 text-[#14532D] flex items-center justify-center font-bold text-sm border border-[#14532D]/20 transition-all cursor-pointer"
             >
-              {user?.name ? user.name.charAt(0) : 'M'}
+              {isProfileLoading ? (
+                <span className="inline-block h-3.5 w-3.5 bg-[#14532D]/20 rounded-full animate-pulse" />
+              ) : (
+                user?.name ? user.name.charAt(0).toUpperCase() : '?'
+              )}
             </button>
 
             {/* Profile Dropdown */}
             {isProfileOpen && (
               <div className="absolute right-0 mt-2 w-64 bg-white rounded-2xl shadow-xl border border-[#E8E5DD] p-3 z-50">
                 <div className="p-2 border-b border-[#F1EFE8]">
-                  <p className="font-bold text-sm text-[#17201A]">{user?.name || 'Mwangi Njoroge'}</p>
-                  <p className="text-xs text-[#66736A]">{user?.email || 'mwangi@example.com'}</p>
+                  {isProfileLoading ? (
+                    <>
+                      <span className="inline-block h-4 w-32 bg-[#E8E5DD] rounded animate-pulse" />
+                      <span className="inline-block h-3 w-24 bg-[#E8E5DD] rounded animate-pulse mt-1.5" />
+                    </>
+                  ) : (
+                    <>
+                      <p className="font-bold text-sm text-[#17201A]">{user?.name || 'Your Account'}</p>
+                      <p className="text-xs text-[#66736A]">{user?.email || ''}</p>
+                    </>
+                  )}
                   <div className="mt-2 flex items-center justify-between">
                     <span className="text-[11px] text-[#14532D] font-semibold">Household Owner</span>
-                    <span className="text-[10px] bg-[#14532D]/10 text-[#14532D] px-2 py-0.5 rounded-full font-bold">
-                      {household?.name || 'Mwangi Family'}
-                    </span>
+                    {isProfileLoading ? (
+                      <span className="inline-block h-4 w-20 bg-[#14532D]/10 rounded-full animate-pulse" />
+                    ) : (
+                      <span className="text-[10px] bg-[#14532D]/10 text-[#14532D] px-2 py-0.5 rounded-full font-bold">
+                        {household?.name || 'My Family'}
+                      </span>
+                    )}
                   </div>
                 </div>
 
                 <div className="py-2 space-y-1">
+                  <button
+                    onClick={() => {
+                      setActiveTab('account');
+                      setIsProfileOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-[#17201A] hover:bg-[#FAF8F2] rounded-xl flex items-center gap-2"
+                  >
+                    <Settings className="w-4 h-4 text-[#66736A]" />
+                    Account Settings
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setActiveTab('reminders');
+                      setIsProfileOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-[#17201A] hover:bg-[#FAF8F2] rounded-xl flex items-center gap-2"
+                  >
+                    <AlarmClock className="w-4 h-4 text-[#66736A]" />
+                    Reminders
+                  </button>
+
                   <button
                     onClick={() => {
                       setActiveTab('family');
@@ -249,6 +301,39 @@ export const Navbar: React.FC = () => {
                   >
                     <ShieldCheck className="w-4 h-4 text-[#14532D]" />
                     Mlo Wangu Premium Membership
+                  </button>
+                </div>
+
+                <div className="pt-2 border-t border-[#F1EFE8] space-y-1">
+                  <button
+                    onClick={() => {
+                      setActiveTab('about');
+                      setIsProfileOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-[#66736A] hover:bg-[#FAF8F2] hover:text-[#17201A] rounded-xl flex items-center gap-2"
+                  >
+                    <Heart className="w-4 h-4 text-[#66736A]" />
+                    About Us
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTab('faq');
+                      setIsProfileOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-[#66736A] hover:bg-[#FAF8F2] hover:text-[#17201A] rounded-xl flex items-center gap-2"
+                  >
+                    <HelpCircle className="w-4 h-4 text-[#66736A]" />
+                    FAQ / Help
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTab('contact');
+                      setIsProfileOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-[#66736A] hover:bg-[#FAF8F2] hover:text-[#17201A] rounded-xl flex items-center gap-2"
+                  >
+                    <LifeBuoy className="w-4 h-4 text-[#66736A]" />
+                    Contact Support
                   </button>
                 </div>
               </div>

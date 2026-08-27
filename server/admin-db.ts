@@ -12,10 +12,9 @@
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
-import { paymentsDb, secureDb } from './secure-db.js';
+import { paymentsDb, secureDb, notificationsDb } from './secure-db.js';
 import { sha256 } from './secure-db.js';
 import { PREMIUM_PRICING } from './mpesa.js';
-import { db as jsonDb } from './db.js';
 import { sendEmail, buildAccessCodeEmail } from './email.js';
 
 let client: SupabaseClient | null = null;
@@ -225,7 +224,7 @@ export const adminDb = {
       // for an access-code delivery notification contains the plaintext
       // code. Admin support has a dedicated "Resend Code Email" action for
       // that; it must never be readable directly off this endpoint.
-      recentNotifications: jsonDb.getNotifications(userId)
+      recentNotifications: (await notificationsDb.getNotifications(userId))
         .slice(0, 10)
         .map((n) => ({ id: n.id, title: n.title, type: n.type, isRead: n.isRead, createdAt: n.createdAt })),
     };
@@ -303,8 +302,7 @@ export const adminDb = {
     // This just lets the user know it happened, in-app, without requiring
     // the admin to message them manually.
     try {
-      jsonDb.addNotification({
-        userId: payment.userId,
+      await notificationsDb.addNotification(payment.userId, {
         type: 'system',
         title: 'Payment confirmed',
         message: payment.planType === 'meal_plan_generation'
@@ -422,8 +420,7 @@ export const adminDb = {
     });
 
     try {
-      jsonDb.addNotification({
-        userId: payment.userId,
+      await notificationsDb.addNotification(payment.userId, {
         type: 'system',
         title: 'Payment verified — your MLO WANGU access code is ready',
         message: `Your KSh ${payment.amountKsh} payment was verified. Your access code: ${issued.code}. Valid for 7 days.`,
@@ -455,8 +452,7 @@ export const adminDb = {
     if (!updated) return { ok: false, reason: 'concurrent_transition' };
 
     try {
-      jsonDb.addNotification({
-        userId: payment.userId,
+      await notificationsDb.addNotification(payment.userId, {
         type: 'system',
         title: 'Payment could not be verified',
         message: reason,
@@ -492,7 +488,7 @@ export const adminDb = {
     const recipientEmail = (user as any)?.email as string | undefined;
     if (!recipientEmail) return { ok: false, reason: 'no_email' };
 
-    const notifications = jsonDb.getNotifications(payment.userId);
+    const notifications = await notificationsDb.getNotifications(payment.userId);
     const original = notifications.find((n) => n.data?.paymentId === paymentId && n.data?.accessCode);
 
     if (original?.data?.accessCode) {
@@ -520,8 +516,7 @@ export const adminDb = {
     });
 
     try {
-      jsonDb.addNotification({
-        userId: payment.userId,
+      await notificationsDb.addNotification(payment.userId, {
         type: 'system',
         title: 'A new MLO WANGU access code was issued',
         message: `Your previous access code could not be resent, so a new one was issued: ${reissued.code}. Valid for 7 days.`,

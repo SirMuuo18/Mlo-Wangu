@@ -7,8 +7,70 @@ import type {
   IDatabaseAdapter, UserProfile, Budget, BudgetCategory,
   Expense, HouseholdMember, WaterConfig, WaterLog, PinLockoutStatus,
   PaymentRecord, PaymentStatus, SubscriptionRecord, PaymentPlanType,
-  AccessCodeRecord, EntitlementRecord,
+  AccessCodeRecord, EntitlementRecord, NotificationRecord, MealRecord,
+  MealIngredient, MealPlanRecord, MealPlanSaveInput, DayOfWeek, MealSlot,
+  ShoppingListRecord, ShoppingListItemRecord,
 } from './db-adapter.js';
+
+const DAYS_OF_WEEK: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const MEAL_SLOTS: MealSlot[] = ['breakfast', 'lunch', 'dinner', 'snack'];
+
+function mapNotification(row: Record<string, unknown>): NotificationRecord {
+  return {
+    id: row.id as string,
+    userId: row.user_id as string,
+    title: row.title as string,
+    message: row.message as string,
+    type: row.type as NotificationRecord['type'],
+    isRead: Boolean(row.is_read),
+    createdAt: row.created_at as string,
+    data: (row.data as NotificationRecord['data']) ?? null,
+  };
+}
+
+// meal_ingredients/meal_instructions arrive nested (Supabase embedded select)
+// when present; tolerate either an array or a missing key.
+function mapMeal(row: Record<string, unknown>): MealRecord {
+  const ingredients = ((row.meal_ingredients as Record<string, unknown>[]) ?? [])
+    .slice()
+    .sort((a, b) => ((a.sort_order as number) ?? 0) - ((b.sort_order as number) ?? 0))
+    .map((i): MealIngredient => ({
+      name: i.name as string,
+      quantity: Number(i.quantity),
+      unit: i.unit as string,
+      estimatedCostKsh: i.estimated_cost_ksh as number,
+    }));
+  const instructions = ((row.meal_instructions as Record<string, unknown>[]) ?? [])
+    .slice()
+    .sort((a, b) => ((a.sort_order as number) ?? 0) - ((b.sort_order as number) ?? 0))
+    .map((i) => i.step as string);
+
+  return {
+    id: row.id as string,
+    ownerId: (row.owner_id as string) ?? null,
+    name: row.name as string,
+    swahiliName: (row.swahili_name as string) ?? undefined,
+    category: row.category as MealRecord['category'],
+    prepTimeMinutes: row.prep_time_minutes as number,
+    estimatedCostKsh: row.estimated_cost_ksh as number,
+    costLevel: row.cost_level as MealRecord['costLevel'],
+    description: (row.description as string) ?? '',
+    imageUrl: (row.image_url as string) ?? undefined,
+    servings: row.servings as number,
+    kenyanCookingTips: (row.kenyan_cooking_tips as string) ?? undefined,
+    isCustom: Boolean(row.is_custom),
+    tags: (row.tags as string[]) ?? [],
+    ingredients,
+    instructions,
+    nutrition: {
+      proteinRich: Boolean(row.nutrition_protein),
+      carbRich: Boolean(row.nutrition_carb),
+      veggieRich: Boolean(row.nutrition_veggie),
+      fruitIncluded: Boolean(row.nutrition_fruit),
+      approxCalories: (row.approx_calories as number) ?? 500,
+    },
+  };
+}
 
 function mapPayment(row: Record<string, unknown>): PaymentRecord {
   return {
@@ -92,6 +154,8 @@ function mapProfile(row: Record<string, unknown>): UserProfile {
     pinLockedUntil: row.pin_locked_until
       ? new Date(row.pin_locked_until as string).getTime()
       : null,
+    budgetDigestEnabled: Boolean(row.budget_digest_enabled),
+    budgetDigestLastSentAt: (row.budget_digest_last_sent_at as string) ?? null,
   };
 }
 
@@ -123,6 +187,8 @@ export class SupabaseDatabaseAdapter implements IDatabaseAdapter {
         ? new Date(patch.pinLockedUntil).toISOString()
         : null;
     }
+    if (patch.budgetDigestEnabled !== undefined) dbPatch.budget_digest_enabled = patch.budgetDigestEnabled;
+    if (patch.budgetDigestLastSentAt !== undefined) dbPatch.budget_digest_last_sent_at = patch.budgetDigestLastSentAt;
     dbPatch.updated_at = new Date().toISOString();
     await this.db.from('profiles').update(dbPatch).eq('id', userId);
   }
@@ -652,4 +718,503 @@ export class SupabaseDatabaseAdapter implements IDatabaseAdapter {
     if (error || !data || data.length === 0) return null;
     return mapAccessCode(data[0]);
   }
+
+  // ── Notifications ─────────────────────────────────────────────────────────
+  // Strict ownership — never `.or('user_id.is.null,...')`. A notification
+  // with no userId must never be creatable (userId is a required parameter,
+  // not an optional field on the patch) or returned to any caller.
+  async getNotifications(userId: string): Promise<NotificationRecord[]> {
+    const { data } = await this.db
+      .from('notifications').select('*').eq('user_id', userId).order('created_at', { ascending: false });
+    return (data ?? []).map(mapNotification);
+  }
+
+  async addNotification(userId: string, notif: Omit<NotificationRecord, 'id' | 'userId' | 'isRead' | 'createdAt'>): Promise<NotificationRecord> {
+    const { data, error } = await this.db.from('notifications').insert({
+      user_id: userId,
+      title: notif.title,
+      message: notif.message,
+      // 'grocery' isn't in the notifications.type CHECK constraint (and
+      // nothing in the app actually creates one) — fold it into 'system'
+      // rather than let the insert fail.
+      type: notif.type === 'grocery' ? 'system' : notif.type,
+      data: notif.data ?? null,
+    }).select('*').single();
+    if (error || !data) throw new Error(`Failed to create notification: ${error?.message}`);
+    return mapNotification(data);
+  }
+
+  async markNotificationRead(id: string, userId: string): Promise<boolean> {
+    const { data, error } = await this.db.from('notifications')
+      .update({ is_read: true }).eq('id', id).eq('user_id', userId).select('id');
+    return !error && !!data && data.length > 0;
+  }
+
+  // ── Meal Catalog ──────────────────────────────────────────────────────────
+  async getMeals(requesterId?: string): Promise<MealRecord[]> {
+    let query = this.db.from('meals').select('*, meal_ingredients(*), meal_instructions(*)');
+    query = requesterId ? query.or(`owner_id.is.null,owner_id.eq.${requesterId}`) : query.is('owner_id', null);
+    const { data } = await query;
+    return (data ?? []).map(mapMeal);
+  }
+
+  async getMealById(id: string, requesterId?: string): Promise<MealRecord | null> {
+    const { data, error } = await this.db
+      .from('meals').select('*, meal_ingredients(*), meal_instructions(*)').eq('id', id).maybeSingle();
+    if (error || !data) return null;
+    const meal = mapMeal(data);
+    if (meal.ownerId && meal.ownerId !== requesterId) return null;
+    return meal;
+  }
+
+  async addMeal(ownerId: string, meal: Omit<MealRecord, 'id' | 'ownerId' | 'isCustom'>): Promise<MealRecord> {
+    const { data: row, error } = await this.db.from('meals').insert({
+      owner_id: ownerId,
+      name: meal.name,
+      swahili_name: meal.swahiliName ?? null,
+      category: meal.category,
+      prep_time_minutes: meal.prepTimeMinutes,
+      estimated_cost_ksh: meal.estimatedCostKsh,
+      cost_level: meal.costLevel,
+      description: meal.description,
+      image_url: meal.imageUrl ?? null,
+      servings: meal.servings,
+      kenyan_cooking_tips: meal.kenyanCookingTips ?? null,
+      is_custom: true,
+      tags: meal.tags,
+      nutrition_protein: meal.nutrition.proteinRich,
+      nutrition_carb: meal.nutrition.carbRich,
+      nutrition_veggie: meal.nutrition.veggieRich,
+      nutrition_fruit: meal.nutrition.fruitIncluded,
+      approx_calories: meal.nutrition.approxCalories,
+    }).select('id').single();
+    if (error || !row) throw new Error(`Failed to create meal: ${error?.message}`);
+    const mealId = (row as Record<string, unknown>).id as string;
+
+    if (meal.ingredients.length > 0) {
+      await this.db.from('meal_ingredients').insert(
+        meal.ingredients.map((ing, i) => ({
+          meal_id: mealId, name: ing.name, quantity: ing.quantity, unit: ing.unit,
+          estimated_cost_ksh: ing.estimatedCostKsh, sort_order: i,
+        }))
+      );
+    }
+    if (meal.instructions.length > 0) {
+      await this.db.from('meal_instructions').insert(
+        meal.instructions.map((step, i) => ({ meal_id: mealId, step, sort_order: i }))
+      );
+    }
+
+    const created = await this.getMealById(mealId, ownerId);
+    if (!created) throw new Error('Failed to read back created meal');
+    return created;
+  }
+
+  // Only the meal's owner may delete it — system meals (owner_id NULL) can
+  // never match this filter regardless of requesterId.
+  async deleteMeal(id: string, requesterId: string): Promise<boolean> {
+    const { data, error } = await this.db.from('meals')
+      .delete().eq('id', id).eq('owner_id', requesterId).select('id');
+    return !error && !!data && data.length > 0;
+  }
+
+  async getSystemMealByName(name: string): Promise<MealRecord | null> {
+    const { data, error } = await this.db
+      .from('meals').select('*, meal_ingredients(*), meal_instructions(*)')
+      .is('owner_id', null).eq('name', name).maybeSingle();
+    if (error || !data) return null;
+    return mapMeal(data);
+  }
+
+  // ── Meal Plans ────────────────────────────────────────────────────────────
+  async getMealPlan(userId: string, weekStartDate?: string): Promise<MealPlanRecord | null> {
+    let query = this.db.from('meal_plans')
+      .select('*, meal_plan_slots(day_of_week, slot, meals(*, meal_ingredients(*), meal_instructions(*)))')
+      .eq('user_id', userId);
+    query = weekStartDate ? query.eq('week_start_date', weekStartDate) : query.order('week_start_date', { ascending: false });
+    const { data, error } = await query.limit(1).maybeSingle();
+    if (error || !data) return null;
+
+    const row = data as Record<string, unknown>;
+    const days = {} as MealPlanRecord['days'];
+    for (const day of DAYS_OF_WEEK) days[day] = {};
+    for (const slotRow of (row.meal_plan_slots as Record<string, unknown>[]) ?? []) {
+      const day = slotRow.day_of_week as DayOfWeek;
+      const slot = slotRow.slot as MealSlot;
+      const mealRow = slotRow.meals as Record<string, unknown> | null;
+      days[day][slot] = mealRow ? mapMeal(mealRow) : null;
+    }
+
+    return {
+      id: row.id as string,
+      userId: row.user_id as string,
+      householdId: (row.household_id as string) ?? null,
+      weekStartDate: row.week_start_date as string,
+      createdAt: row.created_at as string,
+      days,
+    };
+  }
+
+  // Find-or-create the meal_plans row for (userId, weekStartDate), then
+  // replace its slots wholesale — mirrors the existing setBudget/
+  // setHouseholdMembers "delete children, reinsert" pattern above.
+  async saveMealPlan(plan: MealPlanSaveInput): Promise<MealPlanRecord> {
+    const { data: existing } = await this.db.from('meal_plans')
+      .select('id').eq('user_id', plan.userId).eq('week_start_date', plan.weekStartDate).maybeSingle();
+
+    let planId: string;
+    if (existing?.id) {
+      planId = existing.id as string;
+      await this.db.from('meal_plans').update({ household_id: plan.householdId }).eq('id', planId);
+    } else {
+      const { data: inserted, error } = await this.db.from('meal_plans').insert({
+        user_id: plan.userId, household_id: plan.householdId, week_start_date: plan.weekStartDate,
+      }).select('id').single();
+      if (error || !inserted) throw new Error(`Failed to create meal plan: ${error?.message}`);
+      planId = (inserted as Record<string, unknown>).id as string;
+    }
+
+    await this.db.from('meal_plan_slots').delete().eq('meal_plan_id', planId);
+    const slotRows: Record<string, unknown>[] = [];
+    for (const day of DAYS_OF_WEEK) {
+      for (const slot of MEAL_SLOTS) {
+        const meal = plan.days[day]?.[slot];
+        if (meal) slotRows.push({ meal_plan_id: planId, day_of_week: day, slot, meal_id: meal.id });
+      }
+    }
+    if (slotRows.length > 0) await this.db.from('meal_plan_slots').insert(slotRows);
+
+    const saved = await this.getMealPlan(plan.userId, plan.weekStartDate);
+    if (!saved) throw new Error('Failed to read back saved meal plan');
+    return saved;
+  }
+
+  // ── Shopping Lists ────────────────────────────────────────────────────────
+  async getShoppingList(userId: string, weekStartDate?: string): Promise<ShoppingListRecord | null> {
+    let query = this.db.from('shopping_lists').select('*, shopping_list_items(*)').eq('user_id', userId);
+    query = weekStartDate ? query.eq('week_start_date', weekStartDate) : query.order('week_start_date', { ascending: false });
+    const { data, error } = await query.limit(1).maybeSingle();
+    if (error || !data) return null;
+    return mapShoppingList(data as Record<string, unknown>);
+  }
+
+  async saveShoppingList(list: Omit<ShoppingListRecord, 'updatedAt'> & { updatedAt?: string }): Promise<ShoppingListRecord> {
+    const { data: existing } = await this.db.from('shopping_lists')
+      .select('id').eq('user_id', list.userId).eq('week_start_date', list.weekStartDate).maybeSingle();
+
+    let listId: string;
+    if (existing?.id) {
+      listId = existing.id as string;
+      await this.db.from('shopping_lists').update({ updated_at: new Date().toISOString() }).eq('id', listId);
+    } else {
+      const { data: inserted, error } = await this.db.from('shopping_lists').insert({
+        user_id: list.userId, week_start_date: list.weekStartDate,
+      }).select('id').single();
+      if (error || !inserted) throw new Error(`Failed to create shopping list: ${error?.message}`);
+      listId = (inserted as Record<string, unknown>).id as string;
+    }
+
+    await this.db.from('shopping_list_items').delete().eq('shopping_list_id', listId);
+    if (list.items.length > 0) {
+      await this.db.from('shopping_list_items').insert(
+        list.items.map((item, i) => ({
+          shopping_list_id: listId, name: item.name, category: item.category,
+          quantity: item.quantity, unit: item.unit, estimated_price_ksh: item.estimatedPriceKsh,
+          actual_price_ksh: item.actualPriceKsh ?? null, is_purchased: item.isPurchased, sort_order: i,
+          frequency: item.frequency || 'weekly', source: item.source || 'generated',
+        }))
+      );
+    }
+
+    const saved = await this.getShoppingList(list.userId, list.weekStartDate);
+    if (!saved) throw new Error('Failed to read back saved shopping list');
+    return saved;
+  }
+
+  // ── Account data export (Phase 3B, item 8) ────────────────────────────────
+  // Every query below is explicitly scoped `.eq('user_id'|'owner_id', userId)`
+  // — there is no code path here that can return another user's row.
+  // Deliberately EXCLUDED, and not a bug: budget_pin_credentials (PIN
+  // hash/salt), financial_sessions (session tokens), email_log/
+  // server_error_log (operational/admin-facing, not user content),
+  // push_tokens (raw device tokens), meal_plan_access_codes (only ever
+  // holds a hash — its existence is already reflected via entitlements/
+  // payments), admin_audit_log/support_notes (admin-authored internal
+  // records, out of scope for this pass). payments.daraja_callback_raw is
+  // excluded from the payments rows below for the same "no server-internal
+  // material" reason, even though it's the user's own transaction.
+  async getAccountExport(userId: string, includeFinancial: boolean) {
+    const [
+      profile, households, meals, mealPlans, shoppingLists, waterConfig, waterLogs,
+      reminders, notifications, payments, subscriptions, entitlements, aiHistory,
+    ] = await Promise.all([
+      this.db.from('profiles').select('id,name,email,role,has_budget_pin,is_premium,premium_expiry,onboarding_complete,budget_digest_enabled,created_at').eq('id', userId).maybeSingle(),
+      this.db.from('households').select('id,name,created_at,household_members(id,name,age_group,preferences,allergies,dislikes,nutrition_goals)').eq('owner_id', userId),
+      this.db.from('meals').select('id,name,category,prep_time_minutes,estimated_cost_ksh,servings,created_at').eq('owner_id', userId),
+      this.db.from('meal_plans').select('id,week_start_date,created_at,meal_plan_slots(day_of_week,slot,meals(name))').eq('user_id', userId),
+      this.db.from('shopping_lists').select('id,week_start_date,updated_at,shopping_list_items(name,category,quantity,unit,estimated_price_ksh,actual_price_ksh,is_purchased,frequency,source)').eq('user_id', userId),
+      this.db.from('water_configs').select('daily_target_ml,glass_size_ml,reminders_enabled,reminder_schedule').eq('user_id', userId).maybeSingle(),
+      this.db.from('water_logs').select('log_date,total_ml,target_ml').eq('user_id', userId).order('log_date', { ascending: false }).limit(90),
+      this.db.from('reminder_configs').select('type,label,time,days_of_week,enabled,created_at').eq('user_id', userId),
+      this.db.from('notifications').select('title,message,type,is_read,created_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(500),
+      this.db.from('payments').select('id,amount_ksh,plan_type,payment_method,status,mpesa_receipt,rejection_reason,created_at,verified_at').eq('user_id', userId).order('created_at', { ascending: false }),
+      this.db.from('subscriptions').select('plan_type,price_ksh,status,start_date,end_date,created_at').eq('user_id', userId).order('created_at', { ascending: false }),
+      this.db.from('meal_plan_entitlements').select('source,created_at,expires_at,used_at').eq('user_id', userId).order('created_at', { ascending: false }),
+      this.db.from('ai_conversations').select('role,content,had_financial_context,created_at').eq('user_id', userId).order('created_at', { ascending: true }).limit(1000),
+    ]);
+
+    const result: Record<string, unknown> = {
+      profile: profile.data ?? null,
+      households: households.data ?? [],
+      customMeals: meals.data ?? [],
+      mealPlans: mealPlans.data ?? [],
+      shoppingLists: shoppingLists.data ?? [],
+      water: { config: waterConfig.data ?? null, recentLogs: waterLogs.data ?? [] },
+      reminders: reminders.data ?? [],
+      notifications: notifications.data ?? [],
+      payments: payments.data ?? [],
+      subscriptions: subscriptions.data ?? [],
+      mealPlanEntitlements: entitlements.data ?? [],
+      aiConversationHistory: aiHistory.data ?? [],
+    };
+
+    if (includeFinancial) {
+      const [budgets, expenses] = await Promise.all([
+        this.db.from('budgets').select('month,monthly_income_ksh,income_type,budget_categories(category,planned_amount_ksh,color)').eq('user_id', userId),
+        this.db.from('expenses').select('amount_ksh,category,description,expense_date,created_at').eq('user_id', userId).order('expense_date', { ascending: false }),
+      ]);
+      result.budgets = budgets.data ?? [];
+      result.expenses = expenses.data ?? [];
+    }
+
+    return result;
+  }
+
+  // ── Access-code & Premium expiry warnings (Phase 3B, item 4) ──────────────
+  // Called from GET /api/auth/me (see trigger-point rationale in
+  // migrations/0016_expiry_warned_at.sql). Best-effort: a failure here must
+  // never break the profile fetch that triggered it — caller wraps in
+  // try/catch. Returns nothing; its only effect is zero-or-more notification
+  // rows plus the expiry_warned_at markers that prevent it firing twice.
+  // Atomic claim for the budget-digest send slot (Phase 3B, item 3) — an
+  // UPDATE conditioned on the row still being outside the interval, exactly
+  // like checkAndWarnExpiringCredentials's per-row CAS guard below. Two
+  // near-simultaneous GET /api/auth/me calls for the same user (a real
+  // possibility — a web page load can fire more than one) must never both
+  // "win" and each create their own digest notification; only the request
+  // whose UPDATE actually matches a row proceeds to send anything.
+  async claimBudgetDigestSlot(userId: string, intervalMs: number): Promise<boolean> {
+    const cutoffIso = new Date(Date.now() - intervalMs).toISOString();
+    const nowIso = new Date().toISOString();
+    const { data, error } = await this.db
+      .from('profiles')
+      .update({ budget_digest_last_sent_at: nowIso })
+      .eq('id', userId)
+      .eq('budget_digest_enabled', true)
+      .or(`budget_digest_last_sent_at.is.null,budget_digest_last_sent_at.lte.${cutoffIso}`)
+      .select('id');
+    if (error) throw new Error(`claimBudgetDigestSlot failed: ${error.message}`);
+    return (data ?? []).length > 0;
+  }
+
+  async checkAndWarnExpiringCredentials(userId: string): Promise<void> {
+    const nowIso = new Date().toISOString();
+    const soonIso = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    const { data: codes } = await this.db
+      .from('meal_plan_access_codes')
+      .select('id, expires_at')
+      .eq('user_id', userId)
+      .eq('active', true)
+      .is('expiry_warned_at', null)
+      .gt('expires_at', nowIso)
+      .lte('expires_at', soonIso);
+
+    for (const code of codes ?? []) {
+      const { error: markError } = await this.db
+        .from('meal_plan_access_codes')
+        .update({ expiry_warned_at: nowIso })
+        .eq('id', code.id)
+        .is('expiry_warned_at', null); // CAS-style guard against a concurrent duplicate warning
+      if (markError) continue;
+      await this.db.from('notifications').insert({
+        user_id: userId, type: 'system', title: 'Your access code expires soon',
+        message: `Your meal-plan access code expires within 24 hours (${new Date(code.expires_at as string).toLocaleString()}). Use it before then, or purchase again if it lapses.`,
+        data: { expiresAt: code.expires_at },
+      });
+    }
+
+    const { data: subs } = await this.db
+      .from('subscriptions')
+      .select('id, end_date')
+      .eq('user_id', userId)
+      .eq('status', 'active')
+      .is('expiry_warned_at', null)
+      .gt('end_date', nowIso)
+      .lte('end_date', soonIso);
+
+    for (const sub of subs ?? []) {
+      const { error: markError } = await this.db
+        .from('subscriptions')
+        .update({ expiry_warned_at: nowIso })
+        .eq('id', sub.id)
+        .is('expiry_warned_at', null);
+      if (markError) continue;
+      await this.db.from('notifications').insert({
+        user_id: userId, type: 'system', title: 'Your Premium subscription expires soon',
+        message: `Your Premium subscription expires within 24 hours (${new Date(sub.end_date as string).toLocaleString()}). Renew to keep uninterrupted access.`,
+        data: { expiresAt: sub.end_date },
+      });
+    }
+  }
+
+  // ── Custom & shopping-day reminders (Phase 3B, item 2) ────────────────────
+  async getReminders(userId: string): Promise<Array<{ id: string; type: 'shopping_day' | 'custom'; label: string; time: string; daysOfWeek: string[]; enabled: boolean }>> {
+    const { data, error } = await this.db
+      .from('reminder_configs')
+      .select('id,type,label,time,days_of_week,enabled')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: true });
+    if (error) throw new Error(`getReminders failed: ${error.message}`);
+    return (data ?? []).map((r: any) => ({ id: r.id, type: r.type, label: r.label, time: r.time, daysOfWeek: r.days_of_week ?? [], enabled: r.enabled }));
+  }
+
+  async createReminder(userId: string, input: { type: 'shopping_day' | 'custom'; label: string; time: string; daysOfWeek: string[] }): Promise<{ id: string }> {
+    const { data, error } = await this.db.from('reminder_configs').insert({
+      user_id: userId, type: input.type, label: input.label, time: input.time, days_of_week: input.daysOfWeek, enabled: true,
+    }).select('id').single();
+    if (error) throw new Error(`createReminder failed: ${error.message}`);
+    return { id: data.id };
+  }
+
+  // Scoped to the caller — updates/deletes only ever match a row that is
+  // also owned by userId, so a forged/guessed id can never touch another
+  // user's reminder (defense in depth alongside the RLS policy itself).
+  async updateReminder(userId: string, id: string, patch: { label?: string; time?: string; daysOfWeek?: string[]; enabled?: boolean }): Promise<boolean> {
+    const dbPatch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (patch.label !== undefined) dbPatch.label = patch.label;
+    if (patch.time !== undefined) dbPatch.time = patch.time;
+    if (patch.daysOfWeek !== undefined) dbPatch.days_of_week = patch.daysOfWeek;
+    if (patch.enabled !== undefined) dbPatch.enabled = patch.enabled;
+    const { data, error } = await this.db.from('reminder_configs').update(dbPatch).eq('id', id).eq('user_id', userId).select('id');
+    if (error) throw new Error(`updateReminder failed: ${error.message}`);
+    return (data ?? []).length > 0;
+  }
+
+  async deleteReminder(userId: string, id: string): Promise<boolean> {
+    const { data, error } = await this.db.from('reminder_configs').delete().eq('id', id).eq('user_id', userId).select('id');
+    if (error) throw new Error(`deleteReminder failed: ${error.message}`);
+    return (data ?? []).length > 0;
+  }
+
+  // ── AI conversation history (Phase 3B, item 6) ────────────────────────────
+  // ai_conversations already existed, fully RLS-protected (auth.uid() =
+  // user_id), before this phase — it was simply never written to. No schema
+  // change needed; this just starts using what was already there.
+  async saveAiMessage(userId: string, role: 'user' | 'assistant', content: string, hadFinancialContext: boolean): Promise<void> {
+    const { error } = await this.db.from('ai_conversations').insert({
+      user_id: userId, role, content, had_financial_context: hadFinancialContext,
+    });
+    if (error) throw new Error(`saveAiMessage failed: ${error.message}`);
+  }
+
+  async getAiHistory(userId: string, limit: number): Promise<Array<{ id: string; role: 'user' | 'assistant'; content: string; hadFinancialContext: boolean; createdAt: string }>> {
+    const { data, error } = await this.db
+      .from('ai_conversations')
+      .select('id,role,content,had_financial_context,created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(`getAiHistory failed: ${error.message}`);
+    return (data ?? [])
+      .map((r: any) => ({ id: r.id, role: r.role, content: r.content, hadFinancialContext: r.had_financial_context, createdAt: r.created_at }))
+      .reverse(); // oldest-first for chat-log display
+  }
+
+  // ── Push tokens (Phase 3B, item 1) ────────────────────────────────────────
+  // Upsert keyed on `token` alone (not `user_id, token`) — see
+  // migrations/0012_push_tokens.sql for why a re-registered token must
+  // replace its previous owner's row rather than coexist with it.
+  async registerPushToken(userId: string, token: string, platform: 'ios' | 'android'): Promise<void> {
+    const { error } = await this.db.from('push_tokens').upsert(
+      { user_id: userId, token, platform, updated_at: new Date().toISOString() },
+      { onConflict: 'token' }
+    );
+    if (error) throw new Error(`registerPushToken failed: ${error.message}`);
+  }
+
+  // Scoped to the caller — deletes only if the token belongs to userId, so a
+  // forged/guessed token value can never unregister another user's device.
+  async unregisterPushToken(userId: string, token: string): Promise<void> {
+    const { error } = await this.db.from('push_tokens').delete().eq('user_id', userId).eq('token', token);
+    if (error) throw new Error(`unregisterPushToken failed: ${error.message}`);
+  }
+
+  async getPushTokensForUser(userId: string): Promise<string[]> {
+    const { data, error } = await this.db.from('push_tokens').select('token').eq('user_id', userId);
+    if (error) throw new Error(`getPushTokensForUser failed: ${error.message}`);
+    return (data ?? []).map((r: { token: string }) => r.token);
+  }
+
+  // Called when Expo's send API reports DeviceNotRegistered for this token —
+  // reactive cleanup, since no cron/scheduled job exists in this codebase.
+  async deletePushTokenByValue(token: string): Promise<void> {
+    const { error } = await this.db.from('push_tokens').delete().eq('token', token);
+    if (error) throw new Error(`deletePushTokenByValue failed: ${error.message}`);
+  }
+
+  // ── Server error log (Phase 3B, item 15) ──────────────────────────────────
+  // Best-effort, fire-and-forget by contract (see server/errorLog.ts) — this
+  // method itself still throws on a real DB error so the caller can decide
+  // whether to swallow it, but nothing here ever blocks or retries.
+  async logServerError(entry: { route: string; severity: 'error' | 'warning'; userId: string | null; message: string; context?: Record<string, unknown> }): Promise<void> {
+    const { error } = await this.db.from('server_error_log').insert({
+      route: entry.route, severity: entry.severity, user_id: entry.userId,
+      message: entry.message, context: entry.context ?? null,
+    });
+    if (error) throw new Error(`logServerError failed: ${error.message}`);
+  }
+
+  async listServerErrors(page: number, pageSize: number): Promise<{ rows: Array<{ id: string; correlationId: string; occurredAt: string; route: string; severity: string; userId: string | null; message: string; context: Record<string, unknown> | null }>; total: number }> {
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
+    const { data, error, count } = await this.db
+      .from('server_error_log')
+      .select('id,correlation_id,occurred_at,route,severity,user_id,message,context', { count: 'exact' })
+      .order('occurred_at', { ascending: false })
+      .range(from, to);
+    if (error) throw new Error(`listServerErrors failed: ${error.message}`);
+    return {
+      rows: (data ?? []).map((r: any) => ({
+        id: r.id, correlationId: r.correlation_id, occurredAt: r.occurred_at, route: r.route,
+        severity: r.severity, userId: r.user_id, message: r.message, context: r.context,
+      })),
+      total: count ?? 0,
+    };
+  }
+}
+
+function mapShoppingList(row: Record<string, unknown>): ShoppingListRecord {
+  const items = ((row.shopping_list_items as Record<string, unknown>[]) ?? [])
+    .slice()
+    .sort((a, b) => ((a.sort_order as number) ?? 0) - ((b.sort_order as number) ?? 0))
+    .map((i): ShoppingListItemRecord => ({
+      id: i.id as string,
+      name: i.name as string,
+      category: i.category as string,
+      quantity: Number(i.quantity),
+      unit: i.unit as string,
+      estimatedPriceKsh: i.estimated_price_ksh as number,
+      actualPriceKsh: (i.actual_price_ksh as number) ?? null,
+      isPurchased: Boolean(i.is_purchased),
+      frequency: ((i.frequency as 'weekly' | 'monthly') ?? 'weekly'),
+      source: ((i.source as 'generated' | 'manual') ?? 'generated'),
+    }));
+  return {
+    id: row.id as string,
+    userId: row.user_id as string,
+    weekStartDate: row.week_start_date as string,
+    updatedAt: row.updated_at as string,
+    items,
+  };
 }

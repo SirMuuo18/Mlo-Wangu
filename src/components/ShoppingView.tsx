@@ -1,15 +1,32 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { ShoppingBag, CheckCircle2, Circle, Share2, Copy, Check, Search } from 'lucide-react';
+import { ShoppingBag, CheckCircle2, Circle, Share2, Copy, Check, Search, Plus, X, PenLine } from 'lucide-react';
 import { FoodCategory } from '../types';
 import { getFoodImageUrl } from '../utils/foodImages';
 
 export const ShoppingView: React.FC = () => {
-  const { shoppingList, household, toggleShoppingItem } = useApp();
+  const { shoppingList, household, toggleShoppingItem, addManualShoppingItem, removeManualShoppingItem } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [copied, setCopied] = useState(false);
+
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newItemName, setNewItemName] = useState('');
+  const [newItemQty, setNewItemQty] = useState('1');
+  const [newItemUnit, setNewItemUnit] = useState('pc');
+  const [newItemPrice, setNewItemPrice] = useState('0');
+
+  const handleAddItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newItemName.trim()) return;
+    await addManualShoppingItem(newItemName.trim(), Number(newItemQty) || 1, newItemUnit.trim() || 'pc', Number(newItemPrice) || 0);
+    setNewItemName('');
+    setNewItemQty('1');
+    setNewItemUnit('pc');
+    setNewItemPrice('0');
+    setShowAddForm(false);
+  };
 
   const items = shoppingList?.items || [];
   const purchasedCount = items.filter((i) => i.isPurchased).length;
@@ -45,7 +62,7 @@ export const ShoppingView: React.FC = () => {
   const handleShareWhatsApp = () => {
     const safeTotal = Number(totalCost || 0);
     const lines = [
-      `🛒 *Mlo Wangu Kenyan Grocery List — ${household?.name || 'Mwangi Family'}*`,
+      `🛒 *Mlo Wangu Kenyan Grocery List — ${household?.name || 'My Family'}*`,
       `Estimated Market Total: ~KSh ${safeTotal.toLocaleString()}`,
       '',
     ];
@@ -70,7 +87,7 @@ export const ShoppingView: React.FC = () => {
   const handleCopyClipboard = () => {
     const safeTotal = Number(totalCost || 0);
     const lines = [
-      `Mlo Wangu Kenyan Grocery List — ${household?.name || 'Mwangi Family'}`,
+      `Mlo Wangu Kenyan Grocery List — ${household?.name || 'My Family'}`,
       `Total Estimated Cost: KSh ${safeTotal.toLocaleString()}`,
       '',
     ];
@@ -100,6 +117,13 @@ export const ShoppingView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowAddForm((v) => !v)}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#14532D]/10 hover:bg-[#14532D]/20 text-[#14532D] text-xs font-bold border border-[#14532D]/20 transition-all cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Item</span>
+            </button>
             <button
               onClick={handleCopyClipboard}
               className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#FAF8F2] hover:bg-[#F1EFE8] text-[#17201A] text-xs font-bold border border-[#E8E5DD] transition-all cursor-pointer"
@@ -187,7 +211,69 @@ export const ShoppingView: React.FC = () => {
             ))}
           </div>
         </div>
+        {showAddForm && (
+          <form onSubmit={handleAddItem} className="mt-4 pt-4 border-t border-[#F1EFE8] flex flex-wrap items-end gap-2">
+            <input
+              type="text" placeholder="Item name (e.g. Dish soap)" value={newItemName}
+              onChange={(e) => setNewItemName(e.target.value)} required
+              className="flex-1 min-w-[160px] px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
+            />
+            <input
+              type="number" min="0.1" step="0.1" placeholder="Qty" value={newItemQty}
+              onChange={(e) => setNewItemQty(e.target.value)}
+              className="w-20 px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
+            />
+            <input
+              type="text" placeholder="Unit" value={newItemUnit}
+              onChange={(e) => setNewItemUnit(e.target.value)}
+              className="w-20 px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
+            />
+            <input
+              type="number" min="0" placeholder="Est. KSh" value={newItemPrice}
+              onChange={(e) => setNewItemPrice(e.target.value)}
+              className="w-24 px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
+            />
+            <button type="submit" className="px-4 py-2 rounded-xl bg-[#14532D] text-white text-xs font-bold cursor-pointer">
+              Add
+            </button>
+          </form>
+        )}
       </div>
+
+      {/* Manually Added Items — persist across meal-plan regeneration */}
+      {items.some((i) => i.source === 'manual') && (
+        <div className="bg-white p-5 sm:p-6 rounded-3xl border border-[#E8E5DD] shadow-xs">
+          <div className="flex items-center gap-2 pb-3 border-b border-[#F1EFE8]">
+            <PenLine className="w-4 h-4 text-[#14532D]" />
+            <h3 className="text-sm font-extrabold text-[#17201A]">Added by You</h3>
+          </div>
+          <div className="divide-y divide-[#F1EFE8] mt-2">
+            {items.filter((i) => i.source === 'manual').map((item) => (
+              <div
+                key={item.id}
+                className={`py-3 px-2 rounded-xl flex items-center justify-between ${item.isPurchased ? 'opacity-50 bg-[#FAF8F2]' : ''}`}
+              >
+                <div className="flex items-center gap-3 cursor-pointer flex-1" onClick={() => toggleShoppingItem(item.id)}>
+                  {item.isPurchased ? (
+                    <CheckCircle2 className="w-5 h-5 text-[#2E7D32] fill-green-100 shrink-0" />
+                  ) : (
+                    <Circle className="w-5 h-5 text-[#9CA3AF] shrink-0" />
+                  )}
+                  <p className={`text-xs font-bold ${item.isPurchased ? 'line-through text-[#66736A]' : 'text-[#17201A]'}`}>
+                    {item.name} <span className="text-[#66736A] font-medium">({item.quantity} {item.unit})</span>
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-extrabold text-[#17201A] tabular-nums">KSh {item.estimatedPriceKsh}</span>
+                  <button onClick={() => removeManualShoppingItem(item.id)} className="text-[#66736A] hover:text-red-600 cursor-pointer">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Categorized Grocery List */}
       <div className="space-y-6">

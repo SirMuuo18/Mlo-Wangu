@@ -14,6 +14,15 @@ import {
   OverspendingAnalysis,
 } from '../types';
 
+export interface ReminderConfig {
+  id: string;
+  type: 'shopping_day' | 'custom';
+  label: string;
+  time: string;
+  daysOfWeek: string[];
+  enabled: boolean;
+}
+
 // The financial session is an HttpOnly cookie managed entirely by the server.
 // The frontend never stores, reads, or sends the session token manually.
 // These exports are kept for backward compatibility but are intentional no-ops.
@@ -51,6 +60,21 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 export const api = {
   // Auth & Profile
   getMe: () => request<{ user: UserProfile }>('/api/auth/me'),
+  updateProfileName: (name: string) =>
+    request<{ user: { id: string; name: string } | null }>('/api/profile', { method: 'PUT', body: JSON.stringify({ name }) }),
+  changeEmail: (newEmail: string, currentPassword: string) =>
+    request<{ success: boolean; message: string }>('/api/profile/change-email', {
+      method: 'POST', body: JSON.stringify({ newEmail, currentPassword }),
+    }),
+  // Phase 3B, items 8/9. Export returns the full structured JSON as-is —
+  // the caller decides how to present/save it (a file download, in this
+  // component's case). Deletion requires the exact server contract:
+  // currentPassword + confirmation === 'DELETE'.
+  exportAccountData: () => request<Record<string, unknown>>('/api/account/export'),
+  deleteAccount: (currentPassword: string) =>
+    request<{ success: boolean; message: string }>('/api/account/delete', {
+      method: 'POST', body: JSON.stringify({ currentPassword, confirmation: 'DELETE' }),
+    }),
 
   // Food & Meals
   getFoodItems: () => request<{ items: FoodItem[] }>('/api/food/items'),
@@ -214,6 +238,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ message }),
     }),
+  getAiHistory: () =>
+    request<{ history: Array<{ id: string; role: 'user' | 'assistant'; content: string; hadFinancialContext: boolean; createdAt: string }> }>('/api/ai/history'),
 
   // Payments & Subscription — Premium only ever activates from the server's
   // own verified Daraja callback. The frontend never asserts success; it
@@ -224,11 +250,21 @@ export const api = {
       body: JSON.stringify({ phoneNumber, planType }),
     }),
   getPaymentStatus: (paymentId: string) =>
-    request<{ payment: { id: string; status: 'pending' | 'success' | 'failed' | 'cancelled' | 'expired' | 'rejected'; amountKsh: number; planType: string; createdAt: string; verifiedAt: string | null; mpesaReceipt: string | null; rejectionReason: string | null } }>(`/api/payments/${paymentId}`),
+    request<{ payment: { id: string; status: 'pending' | 'success' | 'failed' | 'cancelled' | 'expired' | 'rejected'; amountKsh: number; planType: string; createdAt: string; verifiedAt: string | null; mpesaReceipt: string | null; rejectionReason: string | null; isStale: boolean } }>(`/api/payments/${paymentId}`),
   getSubscriptionStatus: () => request<{ isPremium: boolean; subscription?: Subscription | null }>('/api/subscription/status'),
 
   // Notifications
   getNotifications: () => request<{ notifications: NotificationItem[] }>('/api/notifications'),
+  // Custom & shopping-day reminders (Phase 3B, item 2) — config only; web
+  // has no local-notification delivery mechanism, so this manages the
+  // config that mobile actually schedules from.
+  getReminders: () => request<{ reminders: ReminderConfig[] }>('/api/reminders'),
+  createReminder: (input: { type: 'shopping_day' | 'custom'; label: string; time: string; daysOfWeek: string[] }) =>
+    request<{ id: string }>('/api/reminders', { method: 'POST', body: JSON.stringify(input) }),
+  updateReminder: (id: string, patch: { label?: string; time?: string; daysOfWeek?: string[]; enabled?: boolean }) =>
+    request<{ success: boolean }>(`/api/reminders/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  deleteReminder: (id: string) =>
+    request<{ success: boolean }>(`/api/reminders/${id}`, { method: 'DELETE' }),
   markNotificationRead: (id: string) => request<{ success: boolean }>(`/api/notifications/${id}/read`, { method: 'POST' }),
 
   // Admin & Audit

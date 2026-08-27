@@ -23,7 +23,11 @@ CREATE TABLE IF NOT EXISTS profiles (
   pin_locked_until    TIMESTAMPTZ,
   onboarding_complete BOOLEAN NOT NULL DEFAULT false,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Opt-in budget-digest push (Phase 3B, item 3). See
+  -- migrations/0017_budget_digest_preference.sql.
+  budget_digest_enabled      BOOLEAN NOT NULL DEFAULT false,
+  budget_digest_last_sent_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_profiles_email ON profiles(email);
 
@@ -85,6 +89,29 @@ DROP TRIGGER IF EXISTS trg_prevent_profile_role_self_escalation ON profiles;
 CREATE TRIGGER trg_prevent_profile_role_self_escalation
   BEFORE UPDATE ON profiles
   FOR EACH ROW EXECUTE FUNCTION prevent_profile_role_self_escalation();
+
+-- Same gap, for the two fields that actually grant paid access. See
+-- migrations/0009_prevent_premium_self_escalation.sql for the live-verified
+-- finding this closes.
+CREATE OR REPLACE FUNCTION prevent_premium_self_escalation()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF auth.role() <> 'service_role' THEN
+    IF NEW.is_premium IS DISTINCT FROM OLD.is_premium THEN
+      NEW.is_premium := OLD.is_premium;
+    END IF;
+    IF NEW.premium_expiry IS DISTINCT FROM OLD.premium_expiry THEN
+      NEW.premium_expiry := OLD.premium_expiry;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_prevent_premium_self_escalation ON profiles;
+CREATE TRIGGER trg_prevent_premium_self_escalation
+  BEFORE UPDATE ON profiles
+  FOR EACH ROW EXECUTE FUNCTION prevent_premium_self_escalation();
 
 -- ─── Budget PIN Credentials ───────────────────────────────────────────────────
 -- Stored separately from profiles so pin_hash never appears in profile queries.
@@ -237,7 +264,15 @@ CREATE TABLE IF NOT EXISTS shopping_list_items (
   estimated_price_ksh INTEGER NOT NULL DEFAULT 0,
   actual_price_ksh    INTEGER,
   is_purchased       BOOLEAN NOT NULL DEFAULT false,
-  sort_order         INTEGER NOT NULL DEFAULT 0
+  sort_order         INTEGER NOT NULL DEFAULT 0,
+  -- Assigned server-side by food category (see server/db.ts's
+  -- generateShoppingItemsFromMealPlan) — never client-supplied. See
+  -- migrations/0010_shopping_item_frequency.sql.
+  frequency          TEXT NOT NULL DEFAULT 'weekly' CHECK (frequency IN ('weekly', 'monthly')),
+  -- 'manual' items are user-added and preserved across meal-plan
+  -- regeneration; 'generated' items come from the meal plan and are
+  -- replaced on every regeneration. See migrations/0014_shopping_item_source.sql.
+  source             TEXT NOT NULL DEFAULT 'generated' CHECK (source IN ('generated', 'manual'))
 );
 CREATE INDEX IF NOT EXISTS idx_items_list ON shopping_list_items(shopping_list_id);
 
@@ -317,7 +352,10 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   start_date     TIMESTAMPTZ,
   end_date       TIMESTAMPTZ,
   mpesa_receipt  TEXT,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Dedup marker for the Phase 3B expiry-warning check — see
+  -- migrations/0016_expiry_warned_at.sql.
+  expiry_warned_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_subs_user ON subscriptions(user_id);
 
@@ -383,7 +421,10 @@ CREATE TABLE IF NOT EXISTS meal_plan_access_codes (
   -- Set only when this code was issued by the Till-verification flow
   -- (admin-db.ts's verifyTillPayment) rather than a manually-issued support
   -- code (issueAccessCode). See migrations/0006_till_verification_access_codes.sql.
-  payment_id   UUID REFERENCES payments(id)
+  payment_id   UUID REFERENCES payments(id),
+  -- Dedup marker for the Phase 3B expiry-warning check — see
+  -- migrations/0016_expiry_warned_at.sql.
+  expiry_warned_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_access_codes_hash ON meal_plan_access_codes(code_hash);
 CREATE INDEX IF NOT EXISTS idx_access_codes_user ON meal_plan_access_codes(user_id);
@@ -467,14 +508,23 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_target ON admin_audit_log(target_user_i
 CREATE INDEX IF NOT EXISTS idx_audit_log_created ON admin_audit_log(created_at DESC);
 
 -- ─── Notifications ────────────────────────────────────────────────────────────
+-- user_id is nullable at the column level only for historical reasons — the
+-- application layer (server/db-adapter.ts's NotificationRecord, secure-db.ts,
+-- db-supabase.ts) requires an explicit userId on every create, and the
+-- notifs_read RLS policy below only ever matches user_id = auth.uid(), never
+-- NULL. A NULL row is simply unreadable by anyone via the API. See
+-- migrations/0008_notifications_strict_ownership.sql.
 CREATE TABLE IF NOT EXISTS notifications (
   id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id    UUID REFERENCES profiles(id) ON DELETE CASCADE,  -- NULL = global
+  user_id    UUID REFERENCES profiles(id) ON DELETE CASCADE,
   title      TEXT NOT NULL,
   message    TEXT NOT NULL,
   type       TEXT NOT NULL DEFAULT 'system' CHECK (type IN ('water','meal','budget','system','premium')),
   is_read    BOOLEAN NOT NULL DEFAULT false,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Structured payload (e.g. { accessCode, paymentId, expiresAt, rejectionReason }
+  -- for the admin Till-verification flow) — see migrations/0008_notifications_strict_ownership.sql.
+  data       JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_notifs_user ON notifications(user_id);
 
@@ -610,10 +660,10 @@ CREATE POLICY "entitlements_owner_read" ON meal_plan_entitlements FOR SELECT USI
 ALTER TABLE support_notes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE admin_audit_log ENABLE ROW LEVEL SECURITY;
 
--- notifications
+-- notifications — strict ownership; see migrations/0008_notifications_strict_ownership.sql
 ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "notifs_read" ON notifications FOR SELECT
-  USING (user_id IS NULL OR user_id = auth.uid());
+  USING (user_id = auth.uid());
 
 -- ai_conversations — PRIVATE
 ALTER TABLE ai_conversations ENABLE ROW LEVEL SECURITY;
@@ -630,7 +680,9 @@ CREATE TABLE IF NOT EXISTS email_log (
   recipient           TEXT NOT NULL,
   email_type          TEXT NOT NULL,
   status              TEXT NOT NULL CHECK (status IN ('sent','failed','not_configured')),
-  related_payment_id  UUID REFERENCES payments(id),
+  -- ON DELETE SET NULL — see migrations/0011_email_log_cascade_fix.sql. An
+  -- email-delivery audit record survives the payment it referenced.
+  related_payment_id  UUID REFERENCES payments(id) ON DELETE SET NULL,
   error               TEXT,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -639,6 +691,63 @@ CREATE INDEX IF NOT EXISTS idx_email_log_payment ON email_log(related_payment_id
 
 -- email_log — service-role only, same pattern as admin_audit_log/support_notes.
 ALTER TABLE email_log ENABLE ROW LEVEL SECURITY;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- push_tokens — Expo push token registry (Phase 3B, item 1). See
+-- migrations/0012_push_tokens.sql for the unique-on-token-alone rationale.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS push_tokens (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  token       TEXT NOT NULL UNIQUE,
+  platform    TEXT NOT NULL CHECK (platform IN ('ios', 'android')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens(user_id);
+ALTER TABLE push_tokens ENABLE ROW LEVEL SECURITY;
+-- push_tokens — service-role only, no client policies.
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- server_error_log — sanitized, allowlist-only error visibility for admins
+-- (Phase 3B, item 15). See migrations/0013_server_error_log.sql.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS server_error_log (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  correlation_id  UUID NOT NULL DEFAULT gen_random_uuid(),
+  occurred_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  route           TEXT NOT NULL,
+  severity        TEXT NOT NULL DEFAULT 'error' CHECK (severity IN ('error', 'warning')),
+  user_id         UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  message         TEXT NOT NULL,
+  context         JSONB,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_server_error_log_occurred ON server_error_log(occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_server_error_log_user ON server_error_log(user_id);
+ALTER TABLE server_error_log ENABLE ROW LEVEL SECURITY;
+-- server_error_log — service-role only, no client policies.
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- reminder_configs — custom & shopping-day local reminders (Phase 3B, item 2).
+-- Does NOT replace the existing water-reminder fields on water_target_config,
+-- which are unchanged. See migrations/0015_reminder_configs.sql.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS reminder_configs (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  type          TEXT NOT NULL CHECK (type IN ('shopping_day', 'custom')),
+  label         TEXT NOT NULL,
+  time          TEXT NOT NULL,
+  days_of_week  TEXT[] NOT NULL DEFAULT '{}',
+  enabled       BOOLEAN NOT NULL DEFAULT true,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_reminder_configs_user ON reminder_configs(user_id);
+ALTER TABLE reminder_configs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "reminder_configs_owner" ON reminder_configs
+  FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Helper: clean up expired financial sessions (call via pg_cron or on-demand)

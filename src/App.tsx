@@ -13,6 +13,12 @@ import { FamilyView } from './components/FamilyView';
 import { ShoppingView } from './components/ShoppingView';
 import { BudgetView } from './components/BudgetView';
 import { AIAssistantView } from './components/AIAssistantView';
+import { AboutView } from './components/AboutView';
+import { FAQView } from './components/FAQView';
+import { ContactView } from './components/ContactView';
+import { AccountView } from './components/AccountView';
+import { NotificationsView } from './components/NotificationsView';
+import { RemindersView } from './components/RemindersView';
 import { AdminGate } from './components/admin/AdminGate';
 
 // Modals
@@ -41,6 +47,12 @@ const AppContent: React.FC = () => {
           {activeTab === 'shopping' && <ShoppingView />}
           {activeTab === 'budget' && <BudgetView />}
           {activeTab === 'ai' && <AIAssistantView />}
+          {activeTab === 'about' && <AboutView />}
+          {activeTab === 'faq' && <FAQView />}
+          {activeTab === 'contact' && <ContactView />}
+          {activeTab === 'account' && <AccountView />}
+          {activeTab === 'notifications' && <NotificationsView />}
+          {activeTab === 'reminders' && <RemindersView />}
         </main>
       </div>
 
@@ -58,13 +70,17 @@ const AppContent: React.FC = () => {
 };
 
 const AuthGate: React.FC = () => {
-  const { isAuthenticated, isLoading } = useAuth();
-  const [onboardingDone, setOnboardingDone] = useState(() => {
-    return localStorage.getItem('mlo_onboarding_done') === 'true';
-  });
+  const { isAuthenticated, isLoading, user, refreshUser } = useAuth();
+  // profiles.onboarding_complete (returned on `user`) is the source of truth
+  // — it's per-account and follows the user across browsers/devices. This
+  // only tracks "completed just now, this session" so the UI advances
+  // instantly without waiting on a refetch; it never overrides a `false`
+  // from the server for a *different* account (there's nothing to override
+  // across an account switch, since this component remounts fresh on login).
+  const [justCompleted, setJustCompleted] = useState(false);
+  const onboardingDone = justCompleted || !!user?.onboardingComplete;
 
   const handleOnboardingComplete = async (data: OnboardingData) => {
-    localStorage.setItem('mlo_onboarding_done', 'true');
     try {
       await fetch('/api/onboarding/complete', {
         method: 'POST',
@@ -80,7 +96,8 @@ const AuthGate: React.FC = () => {
         }),
       });
     } catch { /* non-critical */ }
-    setOnboardingDone(true);
+    setJustCompleted(true);
+    refreshUser(); // reconcile user.onboardingComplete in the background
   };
 
   if (isLoading) {

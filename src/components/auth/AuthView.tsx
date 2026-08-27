@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { Mail, Lock, User, Eye, EyeOff, AlertCircle, CheckCircle2, ArrowLeft } from 'lucide-react';
+import { SUPPORT_EMAIL, SUPPORT_MAILTO } from '../../data/supportContent';
 
 type AuthMode = 'login' | 'register' | 'forgot' | 'reset';
 
@@ -272,6 +273,12 @@ export const AuthView: React.FC = () => {
 
         <p className="text-center text-[11px] text-blue-300/60 mt-6">
           Your financial data is private and encrypted.
+        </p>
+        <p className="text-center text-[11px] text-blue-300/60 mt-2">
+          Need help?{' '}
+          <a href={SUPPORT_MAILTO} className="font-bold text-blue-200 hover:text-white underline underline-offset-2">
+            {SUPPORT_EMAIL}
+          </a>
         </p>
       </div>
     </div>

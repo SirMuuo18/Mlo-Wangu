@@ -24,6 +24,7 @@ import { DayOfWeek, Meal } from '../types';
 export const HomeView: React.FC = () => {
   const {
     user,
+    isProfileLoading,
     household,
     mealPlan,
     waterLog,
@@ -80,7 +81,12 @@ export const HomeView: React.FC = () => {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-2xl sm:text-3xl font-extrabold text-[#17201A] tracking-tight">
-              {greeting}, {user?.name ? user.name.split(' ')[0] : 'Mwangi'} 👋
+              {greeting}
+              {isProfileLoading ? (
+                <span className="inline-block h-5 w-20 bg-[#E8E5DD] rounded-md align-middle ml-2 animate-pulse" />
+              ) : (
+                <>, {user?.name ? user.name.split(' ')[0] : 'there'}</>
+              )} 👋
             </h1>
           </div>
           <p className="text-sm text-[#66736A] mt-1">

@@ -165,6 +165,7 @@ function getInitialData(): DatabaseSchema {
   const defaultNotifications: NotificationItem[] = [
     {
       id: 'notif_1',
+      userId: defaultUserId,
       title: '💧 Hydration Check',
       message: 'Time for an afternoon glass of water! You are at 5 / 8 glasses today.',
       type: 'water',
@@ -173,6 +174,7 @@ function getInitialData(): DatabaseSchema {
     },
     {
       id: 'notif_2',
+      userId: defaultUserId,
       title: '🍲 Dinner Preparation',
       message: 'Tonight\'s Family Dinner: Ugali with Sukuma Wiki & Fried Eggs (25 mins).',
       type: 'meal',
@@ -209,6 +211,20 @@ function getInitialData(): DatabaseSchema {
     payments: [],
   };
 }
+
+// Weekly vs monthly is assigned per FOOD CATEGORY, not per individual
+// ingredient — a reasonable household-shopping approximation (perishables
+// weekly, bulk-bought pantry staples monthly), not a claim of per-item
+// accuracy. This is the one place the value is decided; the client only
+// ever displays it. See migrations/0010_shopping_item_frequency.sql.
+const FREQUENCY_BY_CATEGORY: Record<string, 'weekly' | 'monthly'> = {
+  carbohydrates: 'monthly', // flour, rice, maize — typically bulk-bought
+  proteins: 'weekly',       // fresh meat, fish, eggs
+  vegetables: 'weekly',
+  fruits: 'weekly',
+  dairy: 'weekly',
+  spices_pantry: 'monthly', // oil, salt, sugar, spices
+};
 
 export function generateShoppingItemsFromMealPlan(mealPlan: WeeklyMealPlan): ShoppingList['items'] {
   const itemMap: Record<string, { category: any; quantity: number; unit: string; estimatedPriceKsh: number }> = {};
@@ -256,6 +272,8 @@ export function generateShoppingItemsFromMealPlan(mealPlan: WeeklyMealPlan): Sho
     unit: data.unit,
     estimatedPriceKsh: Math.round(data.estimatedPriceKsh),
     isPurchased: false,
+    frequency: FREQUENCY_BY_CATEGORY[data.category] || 'weekly',
+    source: 'generated',
   }));
 }
 
@@ -773,26 +791,28 @@ class DatabaseManager {
     return sub;
   }
 
-  // Notifications — global (no userId) are visible to everyone; personal
-  // (userId set) are visible only to their owner.
+  // Notifications — strict ownership. A notification with no userId is never
+  // returned to anyone; there is no "global" notification concept.
   public getNotifications(userId: string): NotificationItem[] {
-    return this.data.notifications.filter((n) => !n.userId || n.userId === userId);
+    return this.data.notifications.filter((n) => n.userId === userId);
   }
 
-  // Only the owner of a personal notification may mark it read. Global
-  // notifications (no userId) have no per-user read state in this data
-  // model, so marking one read is a shared, app-wide action — not a
-  // privacy issue since global notifications carry no private data.
+  // Only the owner of a notification may mark it read.
   public markNotificationRead(id: string, userId: string): boolean {
     const notif = this.data.notifications.find((n) => n.id === id);
     if (!notif) return false;
-    if (notif.userId && notif.userId !== userId) return false;
+    if (notif.userId !== userId) return false;
     notif.isRead = true;
     this.saveData();
     return true;
   }
 
-  public addNotification(notif: Omit<NotificationItem, 'id' | 'createdAt' | 'isRead'>) {
+  // userId is required — a notification can never be created without an
+  // explicit owner (see NotificationItem.userId in src/types.ts).
+  public addNotification(notif: Omit<NotificationItem, 'id' | 'createdAt' | 'isRead'> & { userId: string }) {
+    if (!notif.userId) {
+      throw new Error('addNotification requires an explicit userId');
+    }
     const newNotif: NotificationItem = {
       id: `notif_${Date.now()}`,
       ...notif,

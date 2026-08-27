@@ -4,7 +4,7 @@ import { Users, Plus, UserCheck, ShieldAlert, Heart, AlertCircle, Edit2, Trash2,
 import { AgeGroup, HouseholdMember } from '../types';
 
 export const FamilyView: React.FC = () => {
-  const { household, updateHousehold } = useApp();
+  const { household, updateHousehold, isProfileLoading } = useApp();
 
   const [isEditingMember, setIsEditingMember] = useState<HouseholdMember | null>(null);
   const [isAddingNew, setIsAddingNew] = useState(false);
@@ -106,7 +106,11 @@ export const FamilyView: React.FC = () => {
             </div>
             <div>
               <h1 className="text-2xl font-extrabold text-[#17201A] tracking-tight">
-                {household?.name || 'The Mwangi Family'}
+                {isProfileLoading ? (
+                  <span className="inline-block h-6 w-40 bg-[#E8E5DD] rounded animate-pulse align-middle" />
+                ) : (
+                  household?.name || 'My Family'
+                )}
               </h1>
               <p className="text-xs text-[#66736A] mt-0.5">
                 {household?.members?.length || 5} Family Members • Scaled Meal Portions & Personalized Health Needs

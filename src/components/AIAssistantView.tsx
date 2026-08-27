@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { Bot, Send, User, Lock, Unlock, Shield, AlertCircle } from 'lucide-react';
 import { api } from '../services/api';
@@ -24,6 +24,25 @@ export const AIAssistantView: React.FC = () => {
 
   const [inputMessage, setInputMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
+
+  // Load prior turns on open (Phase 3B, item 6) — replaces the hardcoded
+  // welcome message only if real history exists; a brand-new user with no
+  // history keeps seeing the same welcome message as before this feature.
+  useEffect(() => {
+    let cancelled = false;
+    api.getAiHistory().then((res) => {
+      if (cancelled || res.history.length === 0) return;
+      setMessages(
+        res.history.map((h) => ({
+          id: h.id,
+          sender: h.role === 'user' ? 'user' : 'assistant',
+          text: h.content,
+          timestamp: new Date(h.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        }))
+      );
+    }).catch(() => { /* non-critical — chat still works without history */ });
+    return () => { cancelled = true; };
+  }, []);
 
   const suggestedPrompts = [
     'I have KSh 300 left today, what dinner can I cook for 5 people?',

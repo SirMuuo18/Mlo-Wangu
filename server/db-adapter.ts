@@ -12,6 +12,8 @@ export interface UserProfile {
   onboardingComplete: boolean;
   pinFailedAttempts: number;
   pinLockedUntil: number | null;  // epoch ms
+  budgetDigestEnabled?: boolean;
+  budgetDigestLastSentAt?: string | null;
 }
 
 export interface FinancialSession {
@@ -150,6 +152,101 @@ export interface SubscriptionRecord {
   mpesaReceipt: string | null;
 }
 
+// ── Notifications ────────────────────────────────────────────────────────────
+// userId is always required — a notification with no owner must never be
+// creatable, let alone returned to any user as if it were theirs.
+export interface NotificationRecord {
+  id: string;
+  userId: string;
+  title: string;
+  message: string;
+  type: 'water' | 'meal' | 'grocery' | 'budget' | 'system' | 'premium';
+  isRead: boolean;
+  createdAt: string;
+  data?: { accessCode?: string; paymentId?: string; expiresAt?: string | null; rejectionReason?: string } | null;
+}
+
+// ── Meal Catalog (system meals, owner_id NULL, + user custom meals) ──────────
+export interface MealIngredient {
+  name: string;
+  quantity: number;
+  unit: string;
+  estimatedCostKsh: number;
+}
+
+export interface MealRecord {
+  id: string;
+  ownerId: string | null;  // null = system meal, visible to everyone
+  name: string;
+  swahiliName?: string;
+  category: 'breakfast' | 'lunch' | 'dinner' | 'snack';
+  prepTimeMinutes: number;
+  estimatedCostKsh: number;
+  costLevel: 'budget' | 'moderate' | 'feast';
+  description: string;
+  imageUrl?: string;
+  servings: number;
+  kenyanCookingTips?: string;
+  isCustom: boolean;
+  tags: string[];
+  ingredients: MealIngredient[];
+  instructions: string[];
+  nutrition: {
+    proteinRich: boolean;
+    carbRich: boolean;
+    veggieRich: boolean;
+    fruitIncluded: boolean;
+    approxCalories: number;
+  };
+}
+
+// ── Meal Plans ─────────────────────────────────────────────────────────────
+export type DayOfWeek = 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday' | 'Sunday';
+export type MealSlot = 'breakfast' | 'lunch' | 'dinner' | 'snack';
+
+export interface MealPlanRecord {
+  id: string;
+  userId: string;
+  householdId: string | null;
+  weekStartDate: string;  // 'YYYY-MM-DD'
+  createdAt: string;
+  days: Record<DayOfWeek, Partial<Record<MealSlot, MealRecord | null>>>;
+}
+
+// Save only needs each slot's meal id (it must already be a real row in
+// `meals`, i.e. sourced from getMeals()/getMealById()/addMeal()) — not a
+// full MealRecord.
+export interface MealPlanSaveInput {
+  id: string;
+  userId: string;
+  householdId: string | null;
+  weekStartDate: string;
+  createdAt?: string;
+  days: Record<DayOfWeek, Partial<Record<MealSlot, { id: string } | null>>>;
+}
+
+// ── Shopping Lists ───────────────────────────────────────────────────────────
+export interface ShoppingListItemRecord {
+  id: string;
+  name: string;
+  category: string;
+  quantity: number;
+  unit: string;
+  estimatedPriceKsh: number;
+  actualPriceKsh?: number | null;
+  isPurchased: boolean;
+  frequency: 'weekly' | 'monthly';
+  source: 'generated' | 'manual';
+}
+
+export interface ShoppingListRecord {
+  id: string;
+  userId: string;
+  weekStartDate: string;
+  updatedAt: string;
+  items: ShoppingListItemRecord[];
+}
+
 export interface IDatabaseAdapter {
   // ── Profile ───────────────────────────────────────────────────────────────
   getUser(userId: string): Promise<UserProfile | null>;
@@ -211,4 +308,27 @@ export interface IDatabaseAdapter {
   getLatestSubscription(userId: string): Promise<SubscriptionRecord | null>;
   createOrExtendSubscription(userId: string, data: { planType: 'weekly' | 'monthly'; priceKsh: number; durationDays: number; mpesaReceipt: string; paymentId: string }): Promise<SubscriptionRecord>;
   countActiveSubscriptions(): Promise<number>;
+
+  // ── Notifications ─────────────────────────────────────────────────────────
+  getNotifications(userId: string): Promise<NotificationRecord[]>;
+  addNotification(userId: string, notif: Omit<NotificationRecord, 'id' | 'userId' | 'isRead' | 'createdAt'>): Promise<NotificationRecord>;
+  markNotificationRead(id: string, userId: string): Promise<boolean>;
+
+  // ── Meal Catalog ──────────────────────────────────────────────────────────
+  // requesterId undefined = anonymous catalog browsing (system meals only).
+  getMeals(requesterId?: string): Promise<MealRecord[]>;
+  getMealById(id: string, requesterId?: string): Promise<MealRecord | null>;
+  addMeal(ownerId: string, meal: Omit<MealRecord, 'id' | 'ownerId' | 'isCustom'>): Promise<MealRecord>;
+  deleteMeal(id: string, requesterId: string): Promise<boolean>;
+  // Idempotent seed helper (see server/scripts/seed-meal-catalog.ts) — finds
+  // an existing system meal (owner_id IS NULL) by name, or null.
+  getSystemMealByName(name: string): Promise<MealRecord | null>;
+
+  // ── Meal Plans ────────────────────────────────────────────────────────────
+  getMealPlan(userId: string, weekStartDate?: string): Promise<MealPlanRecord | null>;
+  saveMealPlan(plan: MealPlanSaveInput): Promise<MealPlanRecord>;
+
+  // ── Shopping Lists ────────────────────────────────────────────────────────
+  getShoppingList(userId: string, weekStartDate?: string): Promise<ShoppingListRecord | null>;
+  saveShoppingList(list: Omit<ShoppingListRecord, 'updatedAt'> & { updatedAt?: string }): Promise<ShoppingListRecord>;
 }

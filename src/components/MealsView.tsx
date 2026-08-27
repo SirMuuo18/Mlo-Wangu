@@ -24,6 +24,7 @@ export const MealsView: React.FC = () => {
     allMeals,
     foodItems,
     household,
+    isProfileLoading,
     setSelectedMealForRecipe,
     setSelectedMealForSwap,
     attemptGeneratePlan,
@@ -100,7 +101,11 @@ export const MealsView: React.FC = () => {
               <h1 className="text-2xl font-extrabold text-[#17201A] tracking-tight">Kenyan Family Meal Planner</h1>
             </div>
             <p className="text-xs text-[#66736A] mt-1">
-              Customized for {household?.name || 'The Mwangi Family'} ({household?.members?.length || 5} members) with authentic Kenyan ingredients.
+              {isProfileLoading ? (
+                <span className="inline-block h-3.5 w-56 bg-[#E8E5DD] rounded animate-pulse align-middle" />
+              ) : (
+                <>Customized for {household?.name || 'My Family'} ({household?.members?.length || 5} members) with authentic Kenyan ingredients.</>
+              )}
             </p>
           </div>
 

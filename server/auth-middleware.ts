@@ -17,10 +17,24 @@ function getCookie(req: Request, name: string): string | undefined {
   return undefined;
 }
 
+// Expo (or any non-browser client) has no cookie jar tied to this origin, so
+// it authenticates with `Authorization: Bearer <supabase access token>`
+// instead. Only consulted when the web cookie is absent — the browser flow
+// is completely unchanged. Never trust this header for anything beyond
+// "here is a token to verify"; the resulting userId still only ever comes
+// from Supabase's own `getUser()` response below, exactly like the cookie path.
+function getBearerToken(req: Request): string | undefined {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) return undefined;
+  const token = header.slice('Bearer '.length).trim();
+  return token || undefined;
+}
+
 export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   // Dev mode: no Supabase needed
   if (USE_JSON_DB) {
     res.locals.userId = DEMO_USER_ID;
+    res.locals.authMethod = 'cookie';
     return next();
   }
 
@@ -32,7 +46,9 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return;
   }
 
-  const accessToken = getCookie(req, 'mlo_auth_session');
+  const cookieToken = getCookie(req, 'mlo_auth_session');
+  const bearerToken = cookieToken ? undefined : getBearerToken(req);
+  const accessToken = cookieToken ?? bearerToken;
 
   if (!accessToken) {
     res.status(401).json({ error: 'Not authenticated' });
@@ -48,8 +64,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     const { data, error } = await supabase.auth.getUser(accessToken);
 
     if (error || !data?.user) {
-      // Try refresh if refresh token exists
-      const refreshToken = getCookie(req, 'mlo_auth_refresh');
+      // Refresh-on-expiry only applies to the cookie flow — a bearer client
+      // (Expo) manages its own Supabase session/refresh and simply retries
+      // with a fresh access token; there is no refresh cookie to fall back to.
+      const refreshToken = cookieToken ? getCookie(req, 'mlo_auth_refresh') : undefined;
       if (refreshToken) {
         const refreshSupabase = createClient(supabaseUrl, supabaseKey, {
           auth: { persistSession: false },
@@ -68,16 +86,25 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
         setAuthCookies(res, refreshData.session.access_token, refreshData.session.refresh_token ?? '');
         res.locals.userId = refreshData.session.user.id;
         res.locals.userEmail = refreshData.session.user.email;
+        res.locals.authMethod = 'cookie';
+        res.locals.accessToken = refreshData.session.access_token;
         return next();
       }
 
-      clearAuthCookies(res);
-      res.status(401).json({ error: 'Invalid session. Please sign in again.' });
+      if (cookieToken) clearAuthCookies(res);
+      res.status(401).json({ error: bearerToken ? 'Invalid or expired token.' : 'Invalid session. Please sign in again.' });
       return;
     }
 
     res.locals.userId = data.user.id;
     res.locals.userEmail = data.user.email;
+    res.locals.authMethod = cookieToken ? 'cookie' : 'bearer';
+    // Stashed for the handful of routes that need to act as this specific
+    // user against Supabase Auth itself (e.g. profile email-change's
+    // auth.updateUser({email}) call) — never used for anything else, and
+    // never trusted as an identity source itself (userId above, from
+    // getUser(), remains the only verified identity).
+    res.locals.accessToken = accessToken;
     return next();
   } catch {
     res.status(401).json({ error: 'Authentication failed' });
@@ -92,12 +119,14 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 export async function optionalAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   if (USE_JSON_DB) {
     res.locals.userId = DEMO_USER_ID;
+    res.locals.authMethod = 'cookie';
     return next();
   }
 
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_ANON_KEY;
-  const accessToken = getCookie(req, 'mlo_auth_session');
+  const cookieToken = getCookie(req, 'mlo_auth_session');
+  const accessToken = cookieToken ?? getBearerToken(req);
 
   if (!supabaseUrl || !supabaseKey || !accessToken) return next();
 
@@ -110,6 +139,7 @@ export async function optionalAuth(req: Request, res: Response, next: NextFuncti
     if (!error && data?.user) {
       res.locals.userId = data.user.id;
       res.locals.userEmail = data.user.email;
+      res.locals.authMethod = cookieToken ? 'cookie' : 'bearer';
     }
   } catch {
     // Swallow — this route works for anonymous callers too.

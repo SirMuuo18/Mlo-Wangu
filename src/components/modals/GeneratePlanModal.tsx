@@ -19,6 +19,10 @@ export const GeneratePlanModal: React.FC = () => {
   const [mpesaMessage, setMpesaMessage] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // Server-computed only (payment.isStale from GET /api/payments/:id) —
+  // purely presentation, never changes what the actual payment status is
+  // or how it's handled; see Phase 3B item 14.
+  const [isStalePending, setIsStalePending] = useState(false);
 
   // Prefetch the Till number as soon as the modal opens, so it's already
   // visible on the intro screen's button instead of only appearing after
@@ -37,6 +41,7 @@ export const GeneratePlanModal: React.FC = () => {
     setAccessCode('');
     setMpesaMessage('');
     setIsLoading(false);
+    setIsStalePending(false);
   };
 
   const close = () => {
@@ -96,6 +101,7 @@ export const GeneratePlanModal: React.FC = () => {
           setStep('payment_failed');
           return;
         }
+        if (opts?.tillGate) setIsStalePending(payment.isStale);
         if (!opts?.tillGate && Date.now() - startedAt > POLL_TIMEOUT_MS) {
           setStep('payment_failed');
           setError('We did not receive a payment confirmation in time.');
@@ -299,9 +305,13 @@ export const GeneratePlanModal: React.FC = () => {
             <div className="w-16 h-16 rounded-full bg-amber-50 text-amber-600 border border-amber-200 flex items-center justify-center mx-auto animate-pulse">
               <Clock3 className="w-8 h-8" />
             </div>
-            <h3 className="text-xl font-extrabold text-[#17201A]">Submitted for verification</h3>
+            <h3 className="text-xl font-extrabold text-[#17201A]">
+              {isStalePending ? 'Still awaiting review' : 'Submitted for verification'}
+            </h3>
             <p className="text-xs text-[#66736A] max-w-xs mx-auto">
-              An admin will review your payment and issue your access code — this screen will update automatically. You can also close this and check the notification bell later.
+              {isStalePending
+                ? "This payment has been pending review longer than usual. It hasn't been rejected — please contact support if you don't hear back soon."
+                : 'An admin will review your payment and issue your access code — this screen will update automatically. You can also close this and check the notification bell later.'}
             </p>
             <button
               onClick={close}

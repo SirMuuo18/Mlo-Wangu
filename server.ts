@@ -15,9 +15,11 @@ import rateLimit from 'express-rate-limit';
 import { GoogleGenAI } from '@google/genai';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { db, generateShoppingItemsFromMealPlan, getMondayOfCurrentWeek, getTodayDate, getCurrentYearMonth } from './server/db.js';
-import { secureDb, paymentsDb } from './server/secure-db.js';
+import { secureDb, paymentsDb, contentDb, notificationsDb, pushDb, errorLogDb, aiDb, reminderDb, expiryWarningDb, budgetDigestDb, accountExportDb } from './server/secure-db.js';
 import { adminDb, type AccessCodeStatus } from './server/admin-db.js';
 import { getDarajaConfig, normalizeKenyanPhone, maskPhone, initiateStkPush, parseDarajaCallback, PREMIUM_PRICING, MEAL_PLAN_GENERATION_PRICE_KSH, normalizeMpesaReceiptCode, extractMpesaCodeFromMessage } from './server/mpesa.js';
+import { sendPushToUser } from './server/push.js';
+import { logServerError } from './server/errorLog.js';
 import { KENYAN_MEALS, KENYAN_FOOD_ITEMS } from './src/data/kenyanFoodData.js';
 import { ExpenseCategory, Meal } from './src/types.js';
 import { requireAuth, optionalAuth, setAuthCookies, clearAuthCookies } from './server/auth-middleware.js';
@@ -118,6 +120,47 @@ const passwordResetLimiter = rateLimit({
   handler: genericLimitHandler,
 });
 
+// Name changes are low-risk; still worth a generous ceiling against a buggy
+// client retry-loop.
+const profileUpdateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
+// An email change re-verifies the account password on every attempt (see
+// the route below) — same credential-testing risk class as login itself,
+// so it gets the same kind of strict ceiling as passwordResetLimiter.
+const emailChangeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
+// A full-account export is exactly the kind of bulk read worth throttling
+// independently of the general per-route limits.
+const accountExportLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
+// Deletion is irreversible — same strict ceiling class as login/password-
+// reset, since repeated failed attempts here are a credential-testing signal.
+const accountDeleteLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
 // Stricter: these gate access to private financial data, not just an account.
 const pinLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -185,6 +228,17 @@ const emailResendLimiter = rateLimit({
   handler: genericLimitHandler,
 });
 
+// Push-token registration is a low-risk config write, but still worth a
+// generous ceiling to prevent token-registration spam (e.g. a buggy client
+// retry-looping) from growing the push_tokens table unbounded.
+const pushRegisterLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: genericLimitHandler,
+});
+
 // Initialize Gemini Client Lazily
 let genAIClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI | null {
@@ -235,13 +289,25 @@ function getCookie(req: Request, name: string): string | undefined {
   return undefined;
 }
 
+// Web sends the financial-session token in an HttpOnly cookie; a bearer
+// (Expo) client has no cookie jar for this origin, so it sends the same
+// opaque token in this header instead. Deliberately not `Authorization`,
+// which already carries the primary Supabase access token for requireAuth —
+// the two tokens mean different things and must never collide.
+const FINANCIAL_SESSION_HEADER = 'x-financial-session';
+
+function getFinancialSessionToken(req: Request): string | undefined {
+  return getCookie(req, 'mlo_fin_session') ?? (req.headers[FINANCIAL_SESSION_HEADER] as string | undefined) ?? undefined;
+}
+
 // STRICT FINANCIAL SECURITY MIDDLEWARE
-// Reads the HttpOnly session cookie, resolves the server-side session,
-// and attaches the verified userId to res.locals.  The client can never
-// spoof this — the cookie is HttpOnly and the userId comes from the
-// server-side session store, NOT from any request header.
+// Resolves the server-side session from either channel above and attaches
+// the verified userId to res.locals. The client can never spoof this — both
+// channels only ever carry an opaque, server-issued, server-invalidatable
+// token, and the userId always comes from the session store, NOT from any
+// request header/body.
 async function requireFinancialSession(req: Request, res: Response, next: NextFunction) {
-  const token = getCookie(req, 'mlo_fin_session');
+  const token = getFinancialSessionToken(req);
 
   if (!token) {
     return res.status(401).json({
@@ -265,6 +331,30 @@ async function requireFinancialSession(req: Request, res: Response, next: NextFu
   // userId comes from the server-side session — never from the client
   res.locals.userId = session.userId;
   next();
+}
+
+// Delivers a freshly-created financial-session token back to the caller on
+// whichever channel it authenticated with. A cookie-authenticated (web)
+// caller keeps the exact existing behavior: HttpOnly cookie only, token
+// never appears in the response body — the whole point of HttpOnly is that
+// page JS (and therefore any XSS on that page) can't read it, so echoing it
+// in JSON here would defeat that. A bearer-authenticated (Expo) caller has
+// no cookie jar for this origin at all, so it gets the token in the body
+// instead — safe specifically because that channel never has the
+// cookie/XSS surface to begin with.
+function respondWithFinancialSession(req: Request, res: Response, token: string, body: Record<string, unknown>) {
+  if (res.locals.authMethod === 'bearer') {
+    res.json({ ...body, financialToken: token });
+    return;
+  }
+  const secure = process.env.NODE_ENV === 'production';
+  res.cookie('mlo_fin_session', token, {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure,
+    maxAge: 15 * 60 * 1000,
+  });
+  res.json(body);
 }
 
 // ADMIN AUTHORIZATION — must run after requireAuth. Role comes from the
@@ -546,6 +636,12 @@ app.post('/api/onboarding/complete', requireAuth, async (req: Request, res: Resp
   // Household preferences (householdType/preferences/allergies/memberCount)
   // remain best-effort/not persisted here by existing design — real
   // household setup happens later via PUT /api/household.
+  //
+  // profiles.onboarding_complete is the authoritative record of this —
+  // localStorage is at most a same-browser UI optimization, never the
+  // source of truth (a fresh login on another device/browser must see this
+  // same flag). Always sets true; there is no client-supplied value to trust.
+  await secureDb.updateUser(userId, { onboardingComplete: true });
   res.json({ ok: true });
 });
 
@@ -554,6 +650,51 @@ app.post('/api/onboarding/complete', requireAuth, async (req: Request, res: Resp
 // -------------------------------------------------------------
 
 // 1. User / Auth
+// Server-computed budget-digest push (Phase 3B, item 3). Same "no cron"
+// trigger point as expiryWarningDb — checked/sent from inside the request
+// of whichever opted-in user happens to be authenticating right now, at
+// most once per 7 days (budget_digest_last_sent_at is the dedup marker).
+// Content is entirely server-computed from the caller's own budget/expense
+// data (never client-supplied); the notification/push body deliberately
+// never contains a KSh figure or category name — only a generic status
+// word derived from the real analysis, per the Stage 1/3 payload-privacy
+// rule. Push delivery itself is best-effort: sendPushToUser() already
+// no-ops safely with zero registered tokens, an invalid token, or the
+// provider being unreachable — none of that is allowed to affect this
+// request either.
+const BUDGET_DIGEST_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function maybeSendBudgetDigest(userId: string, user: { budgetDigestEnabled?: boolean; budgetDigestLastSentAt?: string | null }): Promise<void> {
+  if (!user.budgetDigestEnabled) return;
+  // Cheap optimization only (from the already-fetched, possibly slightly
+  // stale `user` object) — skips the DB round-trip below in the common
+  // case of "was already warned recently." Not the source of correctness;
+  // claimBudgetDigestSlot's atomic UPDATE is the actual authority.
+  const lastSent = user.budgetDigestLastSentAt ? new Date(user.budgetDigestLastSentAt).getTime() : 0;
+  if (Date.now() - lastSent < BUDGET_DIGEST_INTERVAL_MS) return;
+
+  const budget = await secureDb.getBudget(userId);
+  if (!budget) return; // nothing meaningful to summarize yet — never claims the slot for this
+
+  // Atomic claim: only a request whose UPDATE actually matches a row
+  // proceeds. Prevents two near-simultaneous /api/auth/me calls for the
+  // same user from both winning and each sending their own digest.
+  const won = await budgetDigestDb.claimSlot(userId, BUDGET_DIGEST_INTERVAL_MS);
+  if (!won) return;
+
+  const analysis = await secureDb.calculateOverspendingAnalysis(userId);
+  const statusPhrase = analysis.isOverspending
+    ? 'You may be overspending this week'
+    : 'You are on track with your budget this week';
+
+  const notif = await notificationsDb.addNotification(userId, {
+    type: 'budget',
+    title: 'Your weekly budget summary is ready',
+    message: `${statusPhrase} — open Budget and unlock with your PIN to see the details.`,
+  });
+  sendPushToUser(userId, { title: notif.title, body: notif.message, data: { type: 'budget', notificationId: notif.id } }).catch(() => {});
+}
+
 app.get('/api/auth/me', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   const user = await secureDb.getUser(userId);
@@ -570,8 +711,219 @@ app.get('/api/auth/me', requireAuth, async (req: Request, res: Response) => {
     isPremium: user.isPremium,
     premiumExpiry: user.premiumExpiry,
     createdAt: (user as any).createdAt ?? null,
+    onboardingComplete: Boolean((user as any).onboardingComplete),
+    budgetDigestEnabled: Boolean((user as any).budgetDigestEnabled),
   };
+  // Best-effort, never allowed to fail this request (see the ADR in
+  // migrations/0016_expiry_warned_at.sql for why this is the trigger point).
+  expiryWarningDb.checkAndWarn(userId).catch((err) =>
+    logServerError({ route: '/api/auth/me', userId, message: 'Expiry warning check failed', context: { error: String(err?.message || 'unknown') } })
+  );
+  maybeSendBudgetDigest(userId, user).catch((err) =>
+    logServerError({ route: '/api/auth/me', userId, message: 'Budget digest check failed', context: { error: String(err?.message || 'unknown') } })
+  );
   res.json({ user: safeProfile });
+});
+
+// Self-service profile management (Phase 3B, item 7). Name changes are
+// immediate; email changes go through Supabase Auth's own secure-email-change
+// flow (confirmed live on this project: mailer_secure_email_change_enabled),
+// never a raw profiles-table write — the account's email of record does not
+// actually change until the user clicks the confirmation link(s) Supabase
+// itself sends.
+app.put('/api/profile', requireAuth, profileUpdateLimiter, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { name, budgetDigestEnabled } = req.body as { name?: string; budgetDigestEnabled?: boolean };
+  const patch: { name?: string; budgetDigestEnabled?: boolean } = {};
+
+  if (name !== undefined) {
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    if (!trimmed || trimmed.length > 100) {
+      return res.status(400).json({ error: 'Name must be between 1 and 100 characters.' });
+    }
+    patch.name = trimmed;
+  }
+  if (budgetDigestEnabled !== undefined) {
+    if (typeof budgetDigestEnabled !== 'boolean') {
+      return res.status(400).json({ error: 'budgetDigestEnabled must be true or false.' });
+    }
+    patch.budgetDigestEnabled = budgetDigestEnabled;
+  }
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ error: 'Nothing to update.' });
+  }
+
+  await secureDb.updateUser(userId, patch);
+  const user = await secureDb.getUser(userId);
+  res.json({ user: user ? { id: user.id, name: user.name, budgetDigestEnabled: Boolean((user as any).budgetDigestEnabled) } : null });
+});
+
+app.post('/api/profile/change-email', requireAuth, emailChangeLimiter, async (req: Request, res: Response) => {
+  if (USE_JSON_DB) return res.status(503).json({ error: 'Email changes require Supabase. Set USE_JSON_DB=false.' });
+
+  const userId = getAuthenticatedUserId(req, res);
+  const currentEmail = res.locals.userEmail as string | undefined;
+  const accessToken = res.locals.accessToken as string | undefined;
+  const { newEmail, currentPassword } = req.body as { newEmail?: string; currentPassword?: string };
+
+  if (!currentEmail || !accessToken) {
+    // Only reachable for a cookie session predating this deploy (no
+    // accessToken stashed yet) — ask the caller to re-authenticate rather
+    // than proceed without a token to scope the updateUser() call to them.
+    return res.status(401).json({ error: 'Please sign in again before changing your email.' });
+  }
+  const trimmedNewEmail = typeof newEmail === 'string' ? newEmail.trim().toLowerCase() : '';
+  if (!trimmedNewEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedNewEmail)) {
+    return res.status(400).json({ error: 'A valid new email address is required.' });
+  }
+  if (trimmedNewEmail === currentEmail.toLowerCase()) {
+    return res.status(400).json({ error: 'New email must be different from your current email.' });
+  }
+  if (typeof currentPassword !== 'string' || !currentPassword) {
+    return res.status(400).json({ error: 'Your current password is required to change your email.' });
+  }
+
+  const admin = getSupabaseAdmin();
+  if (!admin) return res.status(503).json({ error: 'Auth service not configured' });
+
+  // Recent re-authentication, required before any email change: verifies the
+  // caller actually knows the account password right now, not just that
+  // their existing session token is still valid (a stolen/leaked bearer
+  // token alone can never trigger this).
+  const { error: reauthError } = await admin.auth.signInWithPassword({ email: currentEmail, password: currentPassword });
+  if (reauthError) {
+    return res.status(401).json({ error: 'Current password is incorrect.' });
+  }
+
+  // Calls GoTrue's own PUT /auth/v1/user endpoint directly rather than
+  // supabase-js's auth.updateUser() — that method requires a full in-memory
+  // session (set via setSession(), which needs a refresh token we don't
+  // have server-side for a bearer/mobile caller) and fails closed with
+  // "Auth session missing!" given only an access token. The REST endpoint
+  // itself is stateless and only needs the bearer token, which is exactly
+  // what's available here — same bare-fetch style already used for every
+  // other external integration in this codebase (mpesa.ts, push.ts).
+  const goTrueRes = await fetch(`${process.env.SUPABASE_URL}/auth/v1/user`, {
+    method: 'PUT',
+    headers: {
+      apikey: process.env.SUPABASE_ANON_KEY!,
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ email: trimmedNewEmail }),
+  });
+  if (!goTrueRes.ok) {
+    // Never reveal *why* (e.g. "email already registered") — that would be
+    // an account-enumeration oracle. Same generic-failure discipline as
+    // login/register error handling elsewhere in this file.
+    const errBody = await goTrueRes.json().catch(() => ({}));
+    console.error('[profile/change-email] GoTrue update failed:', goTrueRes.status, errBody?.msg || errBody?.error_description);
+    return res.status(400).json({ error: 'Unable to change your email right now. Please try again.' });
+  }
+
+  res.json({ success: true, message: 'Check both your current and new email address to confirm this change. Your email will not change until confirmed.' });
+});
+
+// Account data export (Phase 3B, item 8). userId is exclusively the
+// authenticated caller's own — there is no request parameter identifying
+// which account to export, so there is no way to redirect this to another
+// user's data. Financial data (budget/expenses) is included only if the
+// SAME channel already used everywhere else (requireFinancialSession's own
+// token resolution, checked inline here rather than as blocking middleware,
+// since the export must still succeed — minus that one section — when the
+// Budget is locked, not 401 the whole request) proves it belongs to this
+// exact userId. No new financial-authorization mechanism is introduced.
+app.get('/api/account/export', requireAuth, accountExportLimiter, async (req: Request, res: Response) => {
+  if (USE_JSON_DB) return res.status(503).json({ error: 'Account export requires Supabase. Set USE_JSON_DB=false.' });
+  const userId = getAuthenticatedUserId(req, res);
+
+  const finToken = getFinancialSessionToken(req);
+  const finSession = finToken ? await secureDb.getFinancialSession(finToken) : undefined;
+  const includeFinancial = !!(finSession && finSession.userId === userId && finSession.expiresAt > Date.now());
+
+  const data = await accountExportDb.export(userId, includeFinancial);
+  if (!data) return res.status(503).json({ error: 'Export temporarily unavailable.' });
+
+  res.json({
+    exportedAt: new Date().toISOString(),
+    financialDataIncluded: includeFinancial,
+    ...data,
+  });
+});
+
+// Self-service account deletion (Phase 3B, item 9) — non-admin accounts
+// only. Uses the ONE user-deletion primitive this codebase already has —
+// Supabase Auth's admin.deleteUser(userId), the same call every test
+// suite's own fixture cleanup already relies on — never a second,
+// invented identity-lifecycle mechanism. Deleting the auth.users row
+// cascades through profiles(id) and from there through every genuinely
+// user-owned table (confirmed live: households, meals, meal_plans,
+// shopping_lists, water_configs/logs, budgets, expenses, notifications,
+// payments, subscriptions, meal_plan_entitlements, ai_conversations,
+// push_tokens, reminder_configs, budget_pin_credentials,
+// financial_sessions — all ON DELETE CASCADE). email_log/server_error_log
+// use ON DELETE SET NULL (Phase 3A/Stage 1 fixes) and survive as orphaned
+// audit records, by design.
+//
+// Three FKs do NOT cascade and are intentionally left exactly as they are
+// (admin_audit_log.admin_id, payments.verified_by, support_notes.admin_id
+// are all ON DELETE NO ACTION) — this is why deletion is restricted to
+// non-admin accounts: an account that ever performed an audited admin
+// action would otherwise hit a hard FK violation. This is the approved
+// Stage 4 product decision, not an oversight.
+app.post('/api/account/delete', requireAuth, accountDeleteLimiter, async (req: Request, res: Response) => {
+  if (USE_JSON_DB) return res.status(503).json({ error: 'Account deletion requires Supabase. Set USE_JSON_DB=false.' });
+
+  const userId = getAuthenticatedUserId(req, res);
+  const currentEmail = res.locals.userEmail as string | undefined;
+  const { currentPassword, confirmation } = req.body as { currentPassword?: string; confirmation?: string };
+
+  if (!currentEmail) {
+    return res.status(401).json({ error: 'Please sign in again before deleting your account.' });
+  }
+  if (confirmation !== 'DELETE') {
+    return res.status(400).json({ error: 'Please type DELETE to confirm — this action cannot be undone.' });
+  }
+  if (typeof currentPassword !== 'string' || !currentPassword) {
+    return res.status(400).json({ error: 'Your current password is required to delete your account.' });
+  }
+
+  const admin = getSupabaseAdmin();
+  if (!admin) return res.status(503).json({ error: 'Auth service not configured' });
+
+  // Recent re-authentication, same discipline as email-change (item 7) —
+  // required before any irreversible action, not just a still-valid session.
+  const { error: reauthError } = await admin.auth.signInWithPassword({ email: currentEmail, password: currentPassword });
+  if (reauthError) {
+    return res.status(401).json({ error: 'Current password is incorrect.' });
+  }
+
+  // The deletion target is exclusively this verified userId — there is no
+  // request field naming a different account, so this can never become an
+  // account-takeover primitive against anyone else.
+  const profile = await secureDb.getUser(userId);
+  if (profile && (profile as any).role === 'admin') {
+    // Deliberately generic — never reveals *why* (the FK/cascade
+    // implementation detail above), matching the enumeration-safe
+    // discipline used everywhere else in this file. The account is left
+    // completely untouched; nothing is attempted.
+    return res.status(403).json({ error: 'This account cannot be deleted through self-service. Please contact support.' });
+  }
+
+  const { error: deleteError } = await admin.auth.admin.deleteUser(userId);
+  if (deleteError) {
+    // Supabase's deleteUser call is the atomicity boundary here: it either
+    // succeeds (auth.users row gone, every CASCADE-linked row gone with
+    // it, in one server-side operation) or fails outright — there is no
+    // code path here that removes some tables and not others. A failure
+    // is reported generically and logged for admin visibility; the
+    // account remains fully intact either way.
+    logServerError({ route: '/api/account/delete', userId, message: 'Account deletion failed', context: { error: String(deleteError.message || 'unknown') } });
+    return res.status(500).json({ error: 'Unable to delete your account right now. Please try again or contact support.' });
+  }
+
+  clearAuthCookies(res);
+  res.json({ success: true, message: 'Your account has been permanently deleted.' });
 });
 
 // 2. Kenyan Food Database & Items
@@ -583,9 +935,9 @@ app.get('/api/food/items', (req: Request, res: Response) => {
 // 3. Kenyan Meals Catalog — system meals are public; custom meals are private to
 // their owner. optionalAuth resolves the caller's identity when present without
 // requiring login just to browse the public catalog.
-app.get('/api/meals', optionalAuth, (req: Request, res: Response) => {
+app.get('/api/meals', optionalAuth, async (req: Request, res: Response) => {
   const { category, costLevel, search } = req.query;
-  let meals = db.getMeals(res.locals.userId);
+  let meals = await contentDb.getMeals(res.locals.userId);
 
   if (category && typeof category === 'string') {
     meals = meals.filter((m) => m.category === category);
@@ -610,8 +962,8 @@ app.get('/api/meals', optionalAuth, (req: Request, res: Response) => {
   res.json({ meals });
 });
 
-app.get('/api/meals/:id', optionalAuth, (req: Request, res: Response) => {
-  const meal = db.getMealById(req.params.id, res.locals.userId);
+app.get('/api/meals/:id', optionalAuth, async (req: Request, res: Response) => {
+  const meal = await contentDb.getMealById(req.params.id, res.locals.userId);
   if (!meal) {
     return res.status(404).json({ error: 'Meal not found' });
   }
@@ -620,7 +972,7 @@ app.get('/api/meals/:id', optionalAuth, (req: Request, res: Response) => {
 
 // Create Custom Meal — always owned by the authenticated caller; a client-supplied
 // ownerId is never accepted (the field isn't even read from req.body).
-app.post('/api/meals', requireAuth, (req: Request, res: Response) => {
+app.post('/api/meals', requireAuth, async (req: Request, res: Response) => {
   try {
     const ownerId = getAuthenticatedUserId(req, res);
     const {
@@ -653,8 +1005,7 @@ app.post('/api/meals', requireAuth, (req: Request, res: Response) => {
     const calculatedCostLevel =
       costLevel || (estimatedCostKsh < 200 ? 'budget' : estimatedCostKsh <= 500 ? 'moderate' : 'feast');
 
-    const newMeal: Meal = {
-      id: `meal_custom_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    const newMealInput: Omit<Meal, 'id' | 'ownerId' | 'isCustom'> = {
       name: name.trim(),
       swahiliName: swahiliName ? swahiliName.trim() : undefined,
       category,
@@ -684,11 +1035,9 @@ app.post('/api/meals', requireAuth, (req: Request, res: Response) => {
       imageUrl: imageUrl?.trim() || undefined,
       servings: Math.max(1, Number(servings) || 4),
       kenyanCookingTips: kenyanCookingTips?.trim() || undefined,
-      isCustom: true,
-      ownerId,
     };
 
-    const savedMeal = db.addMeal(newMeal);
+    const savedMeal = await contentDb.addMeal(ownerId, newMealInput);
     res.status(201).json({ meal: savedMeal });
   } catch (err: any) {
     console.error('Error creating custom meal:', err);
@@ -698,9 +1047,9 @@ app.post('/api/meals', requireAuth, (req: Request, res: Response) => {
 
 // Delete Custom Meal — only the owner may delete; system meals (no ownerId)
 // can never be deleted through this route regardless of caller.
-app.delete('/api/meals/:id', requireAuth, (req: Request, res: Response) => {
+app.delete('/api/meals/:id', requireAuth, async (req: Request, res: Response) => {
   const { id } = req.params;
-  const deleted = db.deleteMeal(id, getAuthenticatedUserId(req, res));
+  const deleted = await contentDb.deleteMeal(id, getAuthenticatedUserId(req, res));
   if (!deleted) {
     return res.status(404).json({ error: 'Meal not found or cannot be deleted' });
   }
@@ -708,13 +1057,13 @@ app.delete('/api/meals/:id', requireAuth, (req: Request, res: Response) => {
 });
 
 // "What Can I Cook With KSh X?" Endpoint (Supports custom unconstrained budgets & unbounded portions)
-app.post('/api/meals/what-can-i-cook', optionalAuth, (req: Request, res: Response) => {
+app.post('/api/meals/what-can-i-cook', optionalAuth, async (req: Request, res: Response) => {
   const { budgetKsh, householdSize = 4, ingredients = [] } = req.body;
   const numBudget = Number(budgetKsh);
   const isNoLimit = numBudget === 0 || isNaN(numBudget) || numBudget < 0;
   const maxBudget = isNoLimit ? Infinity : numBudget;
   const portions = Math.max(1, Number(householdSize) || 4);
-  const allMeals = db.getMeals(res.locals.userId);
+  const allMeals = await contentDb.getMeals(res.locals.userId);
 
   // Score meals based on budget fit and available ingredients
   const results = allMeals
@@ -764,20 +1113,20 @@ app.post('/api/meals/what-can-i-cook', optionalAuth, (req: Request, res: Respons
 });
 
 // 4. Meal Planner
-app.get('/api/meal-plans/current', requireAuth, (req: Request, res: Response) => {
+app.get('/api/meal-plans/current', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
-  const plan = db.getMealPlan(userId);
+  const plan = await contentDb.getMealPlan(userId);
   res.json({ mealPlan: plan });
 });
 
-app.put('/api/meal-plans/current', requireAuth, (req: Request, res: Response) => {
+app.put('/api/meal-plans/current', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   const updatedPlan = req.body.mealPlan;
   if (!updatedPlan) {
     return res.status(400).json({ error: 'Missing mealPlan body' });
   }
   updatedPlan.userId = userId;
-  const saved = db.saveMealPlan(updatedPlan);
+  const saved = await contentDb.saveMealPlan(updatedPlan);
   res.json({ mealPlan: saved });
 });
 
@@ -854,7 +1203,7 @@ async function generateAndSaveMealPlan(userId: string, res: Response) {
   const weeklyFoodBudget = foodCategory ? Math.round(foodCategory.plannedAmountKsh / 4) : Infinity;
   const maxPerMeal = weeklyFoodBudget === Infinity ? Infinity : Math.round(weeklyFoodBudget / 21); // 3 meals × 7 days
 
-  const allMeals = db.getMeals(userId);
+  const allMeals = await contentDb.getMeals(userId);
 
   function scoreMeal(meal: typeof allMeals[0], usedIds: Set<string>): number {
     if (usedIds.has(meal.id)) return -1000; // strong penalty for repeats
@@ -918,20 +1267,20 @@ async function generateAndSaveMealPlan(userId: string, res: Response) {
     createdAt: new Date().toISOString(),
   };
 
-  const saved = db.saveMealPlan(newPlan as any);
+  const saved = await contentDb.saveMealPlan(newPlan as any);
   res.json({ mealPlan: saved, householdSize, weeklyFoodBudgetKsh: weeklyFoodBudget === Infinity ? null : weeklyFoodBudget });
 }
 
 // Swap a single meal with intelligent Kenyan recommendations
-app.post('/api/meal-plans/swap', requireAuth, (req: Request, res: Response) => {
+app.post('/api/meal-plans/swap', requireAuth, async (req: Request, res: Response) => {
   const { day, mealType, currentMealId, reason } = req.body;
   const userId = getAuthenticatedUserId(req, res);
-  const currentPlan = db.getMealPlan(userId);
+  const currentPlan = await contentDb.getMealPlan(userId);
   if (!currentPlan) {
     return res.status(404).json({ error: 'Meal plan not found' });
   }
 
-  const allMeals = db.getMeals(userId);
+  const allMeals = await contentDb.getMeals(userId);
   const eligibleMeals = allMeals.filter((m) => m.category === mealType && m.id !== currentMealId);
 
   let selectedMeal = eligibleMeals[Math.floor(Math.random() * eligibleMeals.length)] || allMeals[0];
@@ -946,7 +1295,7 @@ app.post('/api/meal-plans/swap', requireAuth, (req: Request, res: Response) => {
 
   if (currentPlan.days[day as any]) {
     (currentPlan.days as any)[day][mealType] = selectedMeal;
-    db.saveMealPlan(currentPlan);
+    await contentDb.saveMealPlan(currentPlan);
   }
 
   res.json({ mealPlan: currentPlan, swappedMeal: selectedMeal });
@@ -971,20 +1320,22 @@ app.put('/api/household', requireAuth, async (req: Request, res: Response) => {
 });
 
 // 6. Shopping List
-app.get('/api/shopping/current', requireAuth, (req: Request, res: Response) => {
+app.get('/api/shopping/current', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
-  const list = db.getShoppingList(userId);
+  const list = await contentDb.getShoppingList(userId);
   res.json({ shoppingList: list });
 });
 
-app.put('/api/shopping/current', requireAuth, (req: Request, res: Response) => {
+app.put('/api/shopping/current', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   const updatedList = req.body.shoppingList;
   if (!updatedList) {
     return res.status(400).json({ error: 'Missing shoppingList payload' });
   }
+  // userId always comes from the verified session — a client-supplied
+  // userId in the body can never redirect this write to another user's list.
   updatedList.userId = userId;
-  const saved = db.saveShoppingList(updatedList);
+  const saved = await contentDb.saveShoppingList(updatedList);
   res.json({ shoppingList: saved });
 });
 
@@ -1011,18 +1362,98 @@ app.put('/api/water/config', requireAuth, async (req: Request, res: Response) =>
   res.json({ config: saved });
 });
 
-// 8. Notifications
-app.get('/api/notifications', requireAuth, (req: Request, res: Response) => {
+// 7b. Custom & shopping-day reminders (Phase 3B, item 2) — configuration
+// only; actual local-notification delivery is entirely a mobile-side
+// concern (mobile/lib/reminders.ts), same as water already is in practice.
+const VALID_REMINDER_TYPES = ['shopping_day', 'custom'];
+const VALID_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+
+function validateReminderInput(body: any): { error: string } | { type: 'shopping_day' | 'custom'; label: string; time: string; daysOfWeek: string[] } {
+  const { type, label, time, daysOfWeek } = body ?? {};
+  if (!VALID_REMINDER_TYPES.includes(type)) return { error: `type must be one of: ${VALID_REMINDER_TYPES.join(', ')}` };
+  const trimmedLabel = typeof label === 'string' ? label.trim() : '';
+  if (!trimmedLabel || trimmedLabel.length > 100) return { error: 'label must be between 1 and 100 characters.' };
+  if (typeof time !== 'string' || !/^([01]\d|2[0-3]):([0-5]\d)$/.test(time)) return { error: 'time must be in HH:MM 24-hour format.' };
+  const days = Array.isArray(daysOfWeek) ? daysOfWeek : [];
+  if (!days.every((d) => VALID_DAYS.includes(d))) return { error: `daysOfWeek entries must be one of: ${VALID_DAYS.join(', ')}` };
+  return { type, label: trimmedLabel, time, daysOfWeek: days };
+}
+
+app.get('/api/reminders', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
-  const notifications = db.getNotifications(userId);
+  const reminders = await reminderDb.list(userId);
+  res.json({ reminders });
+});
+
+app.post('/api/reminders', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const validated = validateReminderInput(req.body);
+  if ('error' in validated) return res.status(400).json(validated);
+  const created = await reminderDb.create(userId, validated);
+  res.status(201).json({ id: created.id });
+});
+
+app.put('/api/reminders/:id', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { label, time, daysOfWeek, enabled } = req.body as { label?: string; time?: string; daysOfWeek?: string[]; enabled?: boolean };
+  if (time !== undefined && !/^([01]\d|2[0-3]):([0-5]\d)$/.test(time)) {
+    return res.status(400).json({ error: 'time must be in HH:MM 24-hour format.' });
+  }
+  if (daysOfWeek !== undefined && (!Array.isArray(daysOfWeek) || !daysOfWeek.every((d) => VALID_DAYS.includes(d)))) {
+    return res.status(400).json({ error: `daysOfWeek entries must be one of: ${VALID_DAYS.join(', ')}` });
+  }
+  const ok = await reminderDb.update(userId, req.params.id, { label, time, daysOfWeek, enabled });
+  if (!ok) return res.status(404).json({ error: 'Reminder not found or not owned by this user.' });
+  res.json({ success: true });
+});
+
+app.delete('/api/reminders/:id', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const ok = await reminderDb.remove(userId, req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Reminder not found or not owned by this user.' });
+  res.json({ success: true });
+});
+
+// 8. Notifications
+app.get('/api/notifications', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const notifications = await notificationsDb.getNotifications(userId);
   res.json({ notifications });
 });
 
-app.post('/api/notifications/:id/read', requireAuth, (req: Request, res: Response) => {
-  const ok = db.markNotificationRead(req.params.id, getAuthenticatedUserId(req, res));
+app.post('/api/notifications/:id/read', requireAuth, async (req: Request, res: Response) => {
+  const ok = await notificationsDb.markNotificationRead(req.params.id, getAuthenticatedUserId(req, res));
   if (!ok) {
     return res.status(404).json({ error: 'Notification not found or not owned by this user' });
   }
+  res.json({ success: true });
+});
+
+// 8b. Push notification tokens (Phase 3B, item 1) — mobile-only in practice
+// (web has no push channel), but not gated by platform here; the mobile
+// client is simply the only caller. userId always comes from the verified
+// session, never the body — a token can never be registered against a
+// different account.
+app.post('/api/push/register', requireAuth, pushRegisterLimiter, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { token, platform } = req.body as { token?: string; platform?: string };
+  if (typeof token !== 'string' || token.length < 10 || token.length > 300) {
+    return res.status(400).json({ error: 'A valid push token is required.' });
+  }
+  if (platform !== 'ios' && platform !== 'android') {
+    return res.status(400).json({ error: 'platform must be "ios" or "android".' });
+  }
+  await pushDb.registerPushToken(userId, token, platform);
+  res.json({ success: true });
+});
+
+app.post('/api/push/unregister', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { token } = req.body as { token?: string };
+  if (typeof token !== 'string' || !token) {
+    return res.status(400).json({ error: 'A token is required.' });
+  }
+  await pushDb.unregisterPushToken(userId, token);
   res.json({ success: true });
 });
 
@@ -1056,16 +1487,7 @@ app.post('/api/financial-auth/setup-pin', requireAuth, pinLimiter, async (req: R
 
   await secureDb.resetPinAttempts(userId);
   const token = await secureDb.createFinancialSession(userId, 15);
-  const secure = process.env.NODE_ENV === 'production';
-
-  res.cookie('mlo_fin_session', token, {
-    httpOnly: true,
-    sameSite: 'strict',
-    secure,
-    maxAge: 15 * 60 * 1000,
-  });
-
-  res.json({ success: true, message: 'Budget PIN created. Budget is now unlocked.' });
+  respondWithFinancialSession(req, res, token, { success: true, message: 'Budget PIN created. Budget is now unlocked.' });
 });
 
 // Unlock Budget — verify 6-digit PIN, enforce lockout, set HttpOnly cookie
@@ -1105,21 +1527,12 @@ app.post('/api/financial-auth/unlock', requireAuth, pinLimiter, async (req: Requ
 
   await secureDb.resetPinAttempts(userId);
   const token = await secureDb.createFinancialSession(userId, 15);
-  const secure = process.env.NODE_ENV === 'production';
-
-  res.cookie('mlo_fin_session', token, {
-    httpOnly: true,
-    sameSite: 'strict',
-    secure,
-    maxAge: 15 * 60 * 1000,
-  });
-
-  res.json({ unlocked: true, message: 'Budget unlocked.' });
+  respondWithFinancialSession(req, res, token, { unlocked: true, message: 'Budget unlocked.' });
 });
 
-// Lock Budget — invalidate server-side session and clear cookie immediately
+// Lock Budget — invalidate server-side session and clear cookie/header session immediately
 app.post('/api/financial-auth/lock', requireAuth, async (req: Request, res: Response) => {
-  const token = getCookie(req, 'mlo_fin_session');
+  const token = getFinancialSessionToken(req);
   if (token) {
     await secureDb.invalidateFinancialSession(token);
   } else {
@@ -1130,9 +1543,9 @@ app.post('/api/financial-auth/lock', requireAuth, async (req: Request, res: Resp
   res.json({ locked: true, message: 'Budget locked. Session terminated.' });
 });
 
-// Check whether the current HttpOnly cookie session is still valid
+// Check whether the current session (cookie or header) is still valid
 app.get('/api/financial-auth/status', async (req: Request, res: Response) => {
-  const token = getCookie(req, 'mlo_fin_session');
+  const token = getFinancialSessionToken(req);
   if (!token) return res.json({ isUnlocked: false });
   const session = await secureDb.getFinancialSession(token);
   const isUnlocked = !!(session && session.expiresAt > Date.now());
@@ -1291,8 +1704,9 @@ app.post('/api/ai/chat', requireAuth, async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Message is required' });
   }
 
-  // Financial context is ONLY injected when the HttpOnly session cookie is present and valid
-  const finToken = getCookie(req, 'mlo_fin_session');
+  // Financial context is ONLY injected when a valid financial session is
+  // present, via either channel (web cookie or the mobile header).
+  const finToken = getFinancialSessionToken(req);
   const finSession = finToken ? await secureDb.getFinancialSession(finToken) : undefined;
   const isFinancialUnlocked = !!(finSession && finSession.userId === userId && finSession.expiresAt > Date.now());
 
@@ -1338,9 +1752,30 @@ You MAY give specific financial advice, budget recovery meal plans, and cost opt
   }
 
   // Fallback Rule: If Gemini API key is not configured, provide intelligent rule-based Kenyan responses
+  // Awaited before responding — not fire-and-forget. A conversation-history
+  // feature that sometimes silently drops the assistant's half of the turn
+  // (a real risk with un-awaited inserts racing the response) is worse than
+  // one that adds a few milliseconds of latency; two small inserts are
+  // negligible next to the LLM call this route already makes. Never allowed
+  // to fail the chat response itself either way — each insert is wrapped
+  // individually so one failing doesn't lose the other, and any failure is
+  // routed to the server error log (visible to admins) instead of vanishing
+  // silently.
+  async function saveTurn(reply: string): Promise<void> {
+    await Promise.all([
+      aiDb.saveMessage(userId, 'user', message, isFinancialUnlocked).catch((err) =>
+        logServerError({ route: '/api/ai/chat', userId, message: 'Failed to persist user turn', context: { error: String(err?.message || 'unknown') } })
+      ),
+      aiDb.saveMessage(userId, 'assistant', reply, isFinancialUnlocked).catch((err) =>
+        logServerError({ route: '/api/ai/chat', userId, message: 'Failed to persist assistant turn', context: { error: String(err?.message || 'unknown') } })
+      ),
+    ]);
+  }
+
   const gemini = getGeminiClient();
   if (!gemini) {
     const fallbackResponse = generateLocalKenyanAIResponse(message, isFinancialUnlocked, household, currentPlan);
+    await saveTurn(fallbackResponse);
     return res.json({
       reply: fallbackResponse,
       provider: 'mlo-local-assistant',
@@ -1363,12 +1798,24 @@ You MAY give specific financial advice, budget recovery meal plans, and cost opt
     });
 
     const reply = response.text || 'Karibu MLO! I am here to help you plan nutritious Kenyan meals and manage your budget.';
+    await saveTurn(reply);
     res.json({ reply, provider: 'gemini-3.7-flash' });
   } catch (err: any) {
     console.error('Gemini API error, falling back to local engine:', err);
     const fallback = generateLocalKenyanAIResponse(message, isFinancialUnlocked, household, currentPlan);
+    await saveTurn(fallback);
     res.json({ reply: fallback, provider: 'mlo-local-fallback' });
   }
+});
+
+// AI conversation history (Phase 3B, item 6) — the caller's own turns only,
+// oldest first. RLS (auth.uid() = user_id) is the real enforcement; this
+// route's own userId still comes exclusively from the verified session.
+app.get('/api/ai/history', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const limit = Math.min(Number(req.query.limit) || 50, 200);
+  const history = await aiDb.getHistory(userId, limit);
+  res.json({ history });
 });
 
 function generateLocalKenyanAIResponse(query: string, isUnlocked: boolean, household: any, mealPlan: any): string {
@@ -1775,6 +2222,7 @@ app.post('/api/payments/mpesa/callback', async (req: Request, res: Response) => 
     res.json(ack);
   } catch (err: any) {
     console.error('[mpesa] callback processing error:', err?.message || err);
+    logServerError({ route: '/api/payments/mpesa/callback', userId: null, message: 'Callback processing error', context: { error: String(err?.message || 'unknown') } });
     res.json(ack); // Safaricom still gets a clean ack — never leak internals, never trigger pointless retries for our own bug.
   }
 });
@@ -1782,12 +2230,22 @@ app.post('/api/payments/mpesa/callback', async (req: Request, res: Response) => 
 // Poll payment status. Returns only the authenticated caller's own payment —
 // User A can never see User B's payment (checked by userId, not by trusting
 // the :id alone).
+// A pending payment older than this has almost certainly been missed by
+// admin review — worth telling the user, never worth changing the record.
+const STALE_PENDING_PAYMENT_MS = 48 * 60 * 60 * 1000; // 48 hours
+
 app.get('/api/payments/:id', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   const payment = await paymentsDb.getPaymentById(req.params.id);
   if (!payment || payment.userId !== userId) {
     return res.status(404).json({ error: 'Payment not found' });
   }
+  // isStale is a purely derived, read-time computation — it never touches
+  // payment.status and never causes any write. A payment only ever leaves
+  // 'pending' via an explicit admin verify/reject action (unchanged). This
+  // is presentation only: "this has been pending unusually long," not a
+  // new state.
+  const isStale = payment.status === 'pending' && (Date.now() - new Date(payment.createdAt).getTime()) > STALE_PENDING_PAYMENT_MS;
   res.json({
     payment: {
       id: payment.id,
@@ -1801,6 +2259,7 @@ app.get('/api/payments/:id', requireAuth, async (req: Request, res: Response) =>
       // never returned from this endpoint; it only ever reaches the user via
       // the in-app notification (and email, when configured).
       rejectionReason: payment.status === 'rejected' ? payment.rejectionReason : null,
+      isStale,
     },
   });
 });
@@ -2001,6 +2460,7 @@ app.post('/api/admin/payments/:paymentId/verify-till', requireAuth, requireAdmin
   } catch (err: any) {
     console.error('[admin/payments/verify-till] failed:', err?.message || err);
     await adminDb.logAudit({ adminId, action: 'TILL_PAYMENT_VERIFIED', metadata: { paymentId }, result: 'failure' });
+    logServerError({ route: '/api/admin/payments/:paymentId/verify-till', userId: adminId, message: 'Till verification failed', context: { paymentId, error: String(err?.message || 'unknown') } });
     res.status(503).json({ error: 'Unable to verify payment right now.' });
   }
 });
@@ -2027,6 +2487,7 @@ app.post('/api/admin/payments/:paymentId/reject', requireAuth, requireAdmin, adm
   } catch (err: any) {
     console.error('[admin/payments/reject] failed:', err?.message || err);
     await adminDb.logAudit({ adminId, action: 'TILL_PAYMENT_REJECTED', metadata: { paymentId }, result: 'failure' });
+    logServerError({ route: '/api/admin/payments/:paymentId/reject', userId: adminId, message: 'Till rejection failed', context: { paymentId, error: String(err?.message || 'unknown') } });
     res.status(503).json({ error: 'Unable to reject payment right now.' });
   }
 });
@@ -2177,6 +2638,21 @@ app.get('/api/admin/audit-log', requireAuth, requireAdmin, async (req: Request, 
   } catch (err: any) {
     console.error('[admin/audit-log] failed:', err?.message || err);
     res.status(503).json({ error: 'Audit log temporarily unavailable' });
+  }
+});
+
+// Server-side error log (Phase 3B, item 15) — admin-only, read-only. Rows
+// are written only from a handful of named call sites (see server/errorLog.ts's
+// callers below); this endpoint never accepts a write.
+app.get('/api/admin/error-log', requireAuth, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const pageSize = Math.min(Number(req.query.pageSize) || 50, 200);
+    const result = await errorLogDb.listServerErrors(page, pageSize);
+    res.json(result);
+  } catch (err: any) {
+    console.error('[admin/error-log] failed:', err?.message || err);
+    res.status(503).json({ error: 'Error log temporarily unavailable' });
   }
 });
 

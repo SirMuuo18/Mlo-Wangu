@@ -13,10 +13,10 @@
 // there is no JSON/demo fallback for it at all, regardless of USE_JSON_DB.
 
 import crypto from 'crypto';
-import { db, getCurrentYearMonth, getTodayDate } from './db.js';
+import { db, getCurrentYearMonth, getTodayDate, getMondayOfCurrentWeek, generateShoppingItemsFromMealPlan } from './db.js';
 import { SupabaseDatabaseAdapter } from './db-supabase.js';
-import type { UserProfile, Household, HouseholdMember, WaterTargetConfig, WaterLog, UserBudget, Expense } from '../src/types.js';
-import type { PaymentStatus, PaymentPlanType } from './db-adapter.js';
+import type { UserProfile, Household, HouseholdMember, WaterTargetConfig, WaterLog, UserBudget, Expense, NotificationItem, Meal, WeeklyMealPlan, ShoppingList, DayOfWeek } from '../src/types.js';
+import type { PaymentStatus, PaymentPlanType, MealRecord, NotificationRecord } from './db-adapter.js';
 import { MEAL_PLAN_GENERATION_ENTITLEMENT_VALID_MS } from './mpesa.js';
 
 function useJson(): boolean {
@@ -358,5 +358,267 @@ export const paymentsDb = {
     const expiresAt = new Date(Date.now() + MEAL_PLAN_GENERATION_ENTITLEMENT_VALID_MS).toISOString();
     const entitlement = await sb().createEntitlementFromAccessCode(userId, claimed.id, expiresAt);
     return { entitlementId: entitlement.id };
+  },
+};
+
+const DAYS: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+function mapMealRecordToMeal(r: MealRecord): Meal {
+  return {
+    id: r.id,
+    name: r.name,
+    swahiliName: r.swahiliName,
+    category: r.category,
+    prepTimeMinutes: r.prepTimeMinutes,
+    estimatedCostKsh: r.estimatedCostKsh,
+    costLevel: r.costLevel,
+    ingredients: r.ingredients,
+    instructions: r.instructions,
+    nutrition: r.nutrition,
+    tags: r.tags,
+    description: r.description,
+    imageUrl: r.imageUrl,
+    servings: r.servings,
+    kenyanCookingTips: r.kenyanCookingTips,
+    isCustom: r.isCustom,
+    ownerId: r.ownerId ?? undefined,
+  };
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────
+export const notificationsDb = {
+  async getNotifications(userId: string): Promise<NotificationItem[]> {
+    if (useJson()) return db.getNotifications(userId);
+    const rows = await sb().getNotifications(userId);
+    return rows.map((r: NotificationRecord) => ({
+      id: r.id, userId: r.userId, title: r.title, message: r.message,
+      type: r.type as NotificationItem['type'], isRead: r.isRead, createdAt: r.createdAt,
+      data: r.data ?? undefined,
+    }));
+  },
+
+  async addNotification(userId: string, notif: Omit<NotificationItem, 'id' | 'userId' | 'isRead' | 'createdAt'>): Promise<NotificationItem> {
+    if (useJson()) return db.addNotification({ ...notif, userId });
+    const r = await sb().addNotification(userId, notif);
+    return { id: r.id, userId: r.userId, title: r.title, message: r.message, type: r.type as NotificationItem['type'], isRead: r.isRead, createdAt: r.createdAt, data: r.data ?? undefined };
+  },
+
+  async markNotificationRead(id: string, userId: string): Promise<boolean> {
+    if (useJson()) return db.markNotificationRead(id, userId);
+    return sb().markNotificationRead(id, userId);
+  },
+};
+
+// Account data export (Phase 3B, item 8) — Supabase-only; JSON dev mode has
+// no real per-user persistence across most of these tables to export anyway.
+export const accountExportDb = {
+  async export(userId: string, includeFinancial: boolean) {
+    if (useJson()) return null;
+    return sb().getAccountExport(userId, includeFinancial);
+  },
+};
+
+// Budget-digest send-slot claim (Phase 3B, item 3) — Supabase-only, like
+// the payment/subscription system itself.
+export const budgetDigestDb = {
+  async claimSlot(userId: string, intervalMs: number): Promise<boolean> {
+    if (useJson()) return false; // dev mode never sends a digest
+    return sb().claimBudgetDigestSlot(userId, intervalMs);
+  },
+};
+
+// Access-code & Premium expiry warnings (Phase 3B, item 4) — Supabase-only,
+// like the payment/subscription system itself; JSON dev mode has no real
+// access-code or subscription lifecycle to warn about.
+export const expiryWarningDb = {
+  async checkAndWarn(userId: string): Promise<void> {
+    if (useJson()) return;
+    await sb().checkAndWarnExpiringCredentials(userId);
+  },
+};
+
+// reminder_configs is a real user-facing CRUD resource (RLS-protected, not
+// service-role-only). JSON dev mode returns an empty list / no-ops rather
+// than inventing a second storage model for it — reminders were never
+// persisted in dev mode before this phase either (water's own JSON-mode
+// storage is unaffected and unchanged).
+export const reminderDb = {
+  async list(userId: string) {
+    if (useJson()) return [];
+    return sb().getReminders(userId);
+  },
+  async create(userId: string, input: { type: 'shopping_day' | 'custom'; label: string; time: string; daysOfWeek: string[] }) {
+    if (useJson()) return { id: `reminder_${Date.now()}` };
+    return sb().createReminder(userId, input);
+  },
+  async update(userId: string, id: string, patch: { label?: string; time?: string; daysOfWeek?: string[]; enabled?: boolean }) {
+    if (useJson()) return true;
+    return sb().updateReminder(userId, id, patch);
+  },
+  async remove(userId: string, id: string) {
+    if (useJson()) return true;
+    return sb().deleteReminder(userId, id);
+  },
+};
+
+// ai_conversations already exists with working RLS — JSON dev mode never had
+// any AI-history persistence (the chat was always fully stateless there),
+// so it stays that way rather than inventing a second storage model for it.
+export const aiDb = {
+  async saveMessage(userId: string, role: 'user' | 'assistant', content: string, hadFinancialContext: boolean): Promise<void> {
+    if (useJson()) return; // no-op — dev-mode chat has always been stateless
+    await sb().saveAiMessage(userId, role, content, hadFinancialContext);
+  },
+  async getHistory(userId: string, limit: number = 50) {
+    if (useJson()) return [];
+    return sb().getAiHistory(userId, limit);
+  },
+};
+
+// Always Supabase-backed — no JSON mode. Push delivery has no meaning in the
+// local JSON-store dev mode (see migrations/0012_push_tokens.sql).
+export const pushDb = {
+  registerPushToken: (userId: string, token: string, platform: 'ios' | 'android') =>
+    sb().registerPushToken(userId, token, platform),
+  unregisterPushToken: (userId: string, token: string) => sb().unregisterPushToken(userId, token),
+  getPushTokensForUser: (userId: string) => sb().getPushTokensForUser(userId),
+  deletePushTokenByValue: (token: string) => sb().deletePushTokenByValue(token),
+};
+
+// Always Supabase-backed — no JSON mode. See migrations/0013_server_error_log.sql.
+export const errorLogDb = {
+  logServerError: (entry: { route: string; severity: 'error' | 'warning'; userId: string | null; message: string; context?: Record<string, unknown> }) =>
+    sb().logServerError(entry),
+  listServerErrors: (page: number, pageSize: number) => sb().listServerErrors(page, pageSize),
+};
+
+// ── Meal catalog, meal plans, shopping lists ────────────────────────────────
+// (JSON mode delegates straight to db.ts, which already speaks Meal/
+// WeeklyMealPlan/ShoppingList natively; Supabase mode maps MealRecord/
+// MealPlanRecord/ShoppingListRecord to the same frontend-facing shapes.)
+export const contentDb = {
+  async getMeals(requesterId?: string): Promise<Meal[]> {
+    if (useJson()) return db.getMeals(requesterId);
+    const rows = await sb().getMeals(requesterId);
+    return rows.map(mapMealRecordToMeal);
+  },
+
+  async getMealById(id: string, requesterId?: string): Promise<Meal | undefined> {
+    if (useJson()) return db.getMealById(id, requesterId);
+    const r = await sb().getMealById(id, requesterId);
+    return r ? mapMealRecordToMeal(r) : undefined;
+  },
+
+  // ownerId always comes from the verified session — never accepted from
+  // the request body.
+  async addMeal(ownerId: string, meal: Omit<Meal, 'id' | 'ownerId' | 'isCustom'>): Promise<Meal> {
+    if (useJson()) {
+      return db.addMeal({
+        id: `meal_custom_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        ...meal,
+        isCustom: true,
+        ownerId,
+      });
+    }
+    const r = await sb().addMeal(ownerId, meal);
+    return mapMealRecordToMeal(r);
+  },
+
+  async deleteMeal(id: string, requesterId: string): Promise<boolean> {
+    if (useJson()) return db.deleteMeal(id, requesterId);
+    return sb().deleteMeal(id, requesterId);
+  },
+
+  async getSystemMealByName(name: string): Promise<Meal | undefined> {
+    if (useJson()) return undefined; // JSON dev mode never needs the seed script
+    const r = await sb().getSystemMealByName(name);
+    return r ? mapMealRecordToMeal(r) : undefined;
+  },
+
+  async getMealPlan(userId: string, weekStartDate: string = getMondayOfCurrentWeek()): Promise<WeeklyMealPlan | undefined> {
+    if (useJson()) return db.getMealPlan(userId, weekStartDate);
+    const p = await sb().getMealPlan(userId, weekStartDate);
+    if (!p) return undefined;
+    const days = {} as WeeklyMealPlan['days'];
+    for (const day of DAYS) {
+      const d = p.days[day] ?? {};
+      days[day] = {
+        breakfast: d.breakfast ? mapMealRecordToMeal(d.breakfast) : (undefined as any),
+        lunch: d.lunch ? mapMealRecordToMeal(d.lunch) : (undefined as any),
+        dinner: d.dinner ? mapMealRecordToMeal(d.dinner) : (undefined as any),
+        snack: d.snack ? mapMealRecordToMeal(d.snack) : undefined,
+      };
+    }
+    return { id: p.id, userId: p.userId, householdId: p.householdId || '', weekStartDate: p.weekStartDate, days, createdAt: p.createdAt };
+  },
+
+  async saveMealPlan(plan: WeeklyMealPlan): Promise<WeeklyMealPlan> {
+    if (useJson()) return db.saveMealPlan(plan);
+    // meal_plans.household_id is a real FK to households(id) (a UUID). The
+    // household object secureDb.getHousehold() hands back for display
+    // purposes synthesizes a non-UUID id (`hh_${userId}`) rather than the
+    // real households row id, so a synthetic/legacy id here must not be
+    // forwarded — household_id isn't read back anywhere in the app, so NULL
+    // is always safe.
+    const isRealUuid = typeof plan.householdId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(plan.householdId);
+    const input = {
+      id: plan.id, userId: plan.userId, householdId: isRealUuid ? plan.householdId : null, weekStartDate: plan.weekStartDate,
+      days: Object.fromEntries(DAYS.map((day) => [day, {
+        breakfast: plan.days[day]?.breakfast ? { id: plan.days[day].breakfast.id } : null,
+        lunch: plan.days[day]?.lunch ? { id: plan.days[day].lunch.id } : null,
+        dinner: plan.days[day]?.dinner ? { id: plan.days[day].dinner.id } : null,
+        snack: plan.days[day]?.snack ? { id: plan.days[day].snack!.id } : null,
+      }])) as any,
+    };
+    await sb().saveMealPlan(input);
+    // Mirror db.saveMealPlan's side effect: regenerate + persist the shopping list.
+    // Manually-added items (Phase 3B, item 10) must survive this regeneration
+    // — the generator only ever knows about meal-plan ingredients, so any
+    // source==='manual' row from the previous list is carried forward
+    // alongside the freshly generated ones rather than being wiped by the
+    // replace-all write contentDb.saveShoppingList still performs.
+    const shoppingItems = generateShoppingItemsFromMealPlan(plan);
+    const previousList = await contentDb.getShoppingList(plan.userId, plan.weekStartDate);
+    const manualItems = (previousList?.items ?? []).filter((i) => i.source === 'manual');
+    await contentDb.saveShoppingList({
+      id: `sl_${plan.id}`, userId: plan.userId, weekStartDate: plan.weekStartDate,
+      items: [...shoppingItems, ...manualItems], updatedAt: new Date().toISOString(),
+    });
+    const saved = await contentDb.getMealPlan(plan.userId, plan.weekStartDate);
+    return saved || plan;
+  },
+
+  async getShoppingList(userId: string, weekStartDate: string = getMondayOfCurrentWeek()): Promise<ShoppingList | undefined> {
+    if (useJson()) return db.getShoppingList(userId, weekStartDate);
+    const l = await sb().getShoppingList(userId, weekStartDate);
+    if (!l) return undefined;
+    return {
+      id: l.id, userId: l.userId, weekStartDate: l.weekStartDate, updatedAt: l.updatedAt,
+      items: l.items.map((i) => ({
+        id: i.id, name: i.name, category: i.category as ShoppingList['items'][0]['category'],
+        quantity: i.quantity, unit: i.unit, estimatedPriceKsh: i.estimatedPriceKsh,
+        isPurchased: i.isPurchased, frequency: i.frequency, source: i.source,
+      })),
+    };
+  },
+
+  async saveShoppingList(list: ShoppingList): Promise<ShoppingList> {
+    if (useJson()) return db.saveShoppingList(list);
+    const saved = await sb().saveShoppingList({
+      id: list.id, userId: list.userId, weekStartDate: list.weekStartDate,
+      items: list.items.map((i) => ({
+        id: i.id, name: i.name, category: i.category, quantity: i.quantity, unit: i.unit,
+        estimatedPriceKsh: i.estimatedPriceKsh, isPurchased: i.isPurchased,
+        frequency: i.frequency ?? 'weekly', source: i.source ?? 'generated',
+      })),
+    });
+    return {
+      id: saved.id, userId: saved.userId, weekStartDate: saved.weekStartDate, updatedAt: saved.updatedAt,
+      items: saved.items.map((i) => ({
+        id: i.id, name: i.name, category: i.category as ShoppingList['items'][0]['category'],
+        quantity: i.quantity, unit: i.unit, estimatedPriceKsh: i.estimatedPriceKsh,
+        isPurchased: i.isPurchased, frequency: i.frequency, source: i.source,
+      })),
+    };
   },
 };

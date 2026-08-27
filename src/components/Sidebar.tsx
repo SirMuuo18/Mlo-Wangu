@@ -13,6 +13,9 @@ import {
   Lock,
   Unlock,
   PlusCircle,
+  Heart,
+  HelpCircle,
+  LifeBuoy,
 } from 'lucide-react';
 
 export const Sidebar: React.FC = () => {
@@ -25,6 +28,7 @@ export const Sidebar: React.FC = () => {
     setIsLogExpenseModalOpen,
     household,
     user,
+    isProfileLoading,
     setIsPremiumModalOpen,
   } = useApp();
 
@@ -50,7 +54,11 @@ export const Sidebar: React.FC = () => {
             </span>
           </div>
           <p className="text-sm font-extrabold text-[#17201A] mt-1 truncate">
-            {household?.name || 'The Mwangi Family'}
+            {isProfileLoading ? (
+              <span className="inline-block h-4 w-28 bg-[#E8E5DD] rounded animate-pulse" />
+            ) : (
+              household?.name || 'My Family'
+            )}
           </p>
           <p className="text-xs text-[#66736A] mt-0.5">Family Meals Shared • Money Private</p>
         </div>
@@ -94,6 +102,30 @@ export const Sidebar: React.FC = () => {
                     )}
                   </span>
                 )}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Help & Info — secondary, low-emphasis links */}
+        <nav className="pt-3 border-t border-[#F1EFE8] space-y-0.5">
+          {([
+            { id: 'about', label: 'About Us', icon: Heart },
+            { id: 'faq', label: 'FAQ / Help', icon: HelpCircle },
+            { id: 'contact', label: 'Contact Support', icon: LifeBuoy },
+          ] as { id: ActiveTab; label: string; icon: React.FC<{ className?: string }> }[]).map((item) => {
+            const Icon = item.icon;
+            const isActive = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setActiveTab(item.id)}
+                className={`w-full flex items-center gap-2.5 px-3.5 py-2 rounded-xl text-[11px] font-semibold transition-all ${
+                  isActive ? 'bg-[#FAF8F2] text-[#14532D]' : 'text-[#66736A] hover:bg-[#FAF8F2] hover:text-[#17201A]'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span>{item.label}</span>
               </button>
             );
           })}

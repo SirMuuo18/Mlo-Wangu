@@ -16,7 +16,7 @@ import {
 import { api } from '../services/api';
 import confetti from 'canvas-confetti';
 
-export type ActiveTab = 'home' | 'meals' | 'family' | 'shopping' | 'budget' | 'cook-ksh' | 'ai';
+export type ActiveTab = 'home' | 'meals' | 'family' | 'shopping' | 'budget' | 'cook-ksh' | 'ai' | 'about' | 'faq' | 'contact' | 'account' | 'notifications' | 'reminders';
 
 interface FinancialSummaryData {
   month: string;
@@ -36,6 +36,14 @@ interface AppContextType {
 
   // User & State
   user: UserProfile | null;
+  // True until the first loadPublicData() round trip resolves (success or
+  // failure). Components that display the real user's name/identity must
+  // gate on this instead of falling back to a hardcoded placeholder name —
+  // user is reliably null during this window even though the caller is
+  // already known to be authenticated (AuthGate already confirmed that
+  // before AppProvider ever mounts), so null here means "still loading",
+  // never "no such user".
+  isProfileLoading: boolean;
   household: Household | null;
   mealPlan: WeeklyMealPlan | null;
   shoppingList: ShoppingList | null;
@@ -83,6 +91,8 @@ interface AppContextType {
   // Public Actions
   logWater: (amountMl: number) => Promise<void>;
   toggleShoppingItem: (itemId: string) => Promise<void>;
+  addManualShoppingItem: (name: string, quantity: number, unit: string, estimatedPriceKsh: number) => Promise<void>;
+  removeManualShoppingItem: (itemId: string) => Promise<void>;
   swapMeal: (day: string, mealType: string, currentMealId: string, reason?: 'cheaper' | 'faster' | 'random') => Promise<void>;
   regenerateMealPlan: (budgetAware?: boolean) => Promise<boolean>;
   // Gate entry point for the "Generate New Plan" button: checks the server
@@ -103,6 +113,7 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [isProfileLoading, setIsProfileLoading] = useState(true);
   const [household, setHousehold] = useState<Household | null>(null);
   const [mealPlan, setMealPlan] = useState<WeeklyMealPlan | null>(null);
   const [shoppingList, setShoppingList] = useState<ShoppingList | null>(null);
@@ -168,6 +179,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (nRes?.notifications) setNotifications(nRes.notifications);
     } catch (err) {
       console.error('Error loading MLO initial data:', err);
+    } finally {
+      // Set regardless of success/failure — a failed profile fetch must
+      // stop showing a "loading" placeholder too, not hang forever.
+      setIsProfileLoading(false);
     }
   }, []);
 
@@ -338,6 +353,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await api.updateShoppingList(updatedList).catch(() => {});
   };
 
+  // Manual shopping items (Phase 3B, item 10) — uses the same whole-list PUT
+  // contract every other shopping-list write already uses; the server marks
+  // it source:'generated' unless told otherwise, so this is the one call
+  // site that explicitly sets source:'manual', which is what makes it
+  // survive the next meal-plan regeneration (secureDb.saveMealPlan
+  // preserves manual rows, replaces generated ones).
+  const addManualShoppingItem = async (name: string, quantity: number, unit: string, estimatedPriceKsh: number) => {
+    const base: ShoppingList = shoppingList ?? {
+      id: `sl_${Date.now()}`, userId: user?.id || '', weekStartDate: new Date().toISOString().slice(0, 10),
+      items: [], updatedAt: new Date().toISOString(),
+    };
+    const newItem = {
+      id: `manual_${Date.now()}`, category: 'other' as const, name, quantity, unit,
+      estimatedPriceKsh, isPurchased: false, frequency: 'weekly' as const, source: 'manual' as const,
+    };
+    const updatedList = { ...base, items: [...base.items, newItem] };
+    setShoppingList(updatedList);
+    await api.updateShoppingList(updatedList).catch(() => {});
+  };
+
+  const removeManualShoppingItem = async (itemId: string) => {
+    if (!shoppingList) return;
+    const updatedList = { ...shoppingList, items: shoppingList.items.filter((i) => i.id !== itemId) };
+    setShoppingList(updatedList);
+    await api.updateShoppingList(updatedList).catch(() => {});
+  };
+
   // Swap Meal
   const swapMeal = async (day: string, mealType: string, currentMealId: string, reason?: 'cheaper' | 'faster' | 'random') => {
     try {
@@ -436,6 +478,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activeTab,
         setActiveTab,
         user,
+        isProfileLoading,
         household,
         mealPlan,
         shoppingList,
@@ -471,6 +514,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         saveCategoryBudget,
         logWater,
         toggleShoppingItem,
+        addManualShoppingItem,
+        removeManualShoppingItem,
         swapMeal,
         regenerateMealPlan,
         attemptGeneratePlan,

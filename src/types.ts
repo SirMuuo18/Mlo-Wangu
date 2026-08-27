@@ -105,6 +105,17 @@ export interface ShoppingItem {
   actualPriceKsh?: number;
   isPurchased: boolean;
   mealRef?: string;
+  // Assigned server-side by food category — weekly for perishables (fresh
+  // veg/fruit/dairy), monthly for pantry staples (grains, oil, spices).
+  // Optional so existing callers that don't set it (e.g. a manually
+  // constructed ShoppingList before this field existed) still type-check.
+  frequency?: 'weekly' | 'monthly';
+  // 'generated' = produced by meal-plan generation (the default, and the
+  // only kind that existed before Phase 3B); 'manual' = added by the user
+  // directly and preserved across the next meal-plan regeneration, which
+  // otherwise replaces the whole list. Optional for the same reason as
+  // frequency above — pre-existing callers default to 'generated' server-side.
+  source?: 'generated' | 'manual';
 }
 
 export interface ShoppingList {
@@ -193,6 +204,10 @@ export interface UserProfile {
   isPremium: boolean;
   premiumExpiry?: string;
   createdAt: string;
+  onboardingComplete?: boolean; // authoritative — see profiles.onboarding_complete; localStorage is never the source of truth
+  // Opt-in only, default false. See migrations/0017_budget_digest_preference.sql.
+  budgetDigestEnabled?: boolean;
+  budgetDigestLastSentAt?: string | null;
 }
 
 export interface Subscription {
@@ -213,7 +228,7 @@ export interface NotificationItem {
   type: 'water' | 'meal' | 'grocery' | 'budget' | 'system';
   isRead: boolean;
   createdAt: string;
-  userId?: string; // undefined/null = global notification (visible to all); set = private to that user
+  userId: string; // always required — a notification with no owner is never created or returned to anyone
   // Structured payload for machine-readable delivery — currently used only
   // by the Till-payment access-code flow. accessCode is the ONE place its
   // plaintext is ever persisted after issuance (never in the DB — see

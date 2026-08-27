@@ -4,6 +4,9 @@ interface AuthUser {
   id: string;
   email?: string;
   name?: string;
+  // Authoritative (profiles.onboarding_complete) — see App.tsx's AuthGate.
+  // Optional only because it's absent until the first /api/auth/me resolves.
+  onboardingComplete?: boolean;
 }
 
 interface AuthContextType {
@@ -17,6 +20,9 @@ interface AuthContextType {
   // Resolves true if the reset also signed the user in (the common case);
   // false means the password was changed but the caller must sign in manually.
   resetPassword: (accessToken: string, password: string) => Promise<boolean>;
+  // Re-fetches /api/auth/me to reconcile server-authoritative fields (e.g.
+  // onboardingComplete right after POST /api/onboarding/complete succeeds).
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -26,9 +32,6 @@ export function useAuth() {
   if (!ctx) throw new Error('useAuth must be used within AuthProvider');
   return ctx;
 }
-
-// In JSON-DB dev mode the server's /api/auth/me always returns the demo user.
-// We detect it by the response — no client env var needed.
 
 async function apiCall(path: string, body?: object) {
   const res = await fetch(path, {
@@ -51,7 +54,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const res = await fetch('/api/auth/me', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
-        setUser(data.user ?? { id: 'usr_mwangi_demo', name: 'Demo User' });
+        // A 200 with no `user` field shouldn't happen (requireAuth would
+        // 401 first), but if it ever does, treat it as "not signed in"
+        // rather than fabricating a placeholder identity.
+        setUser(data.user ?? null);
       } else {
         setUser(null);
       }
@@ -91,7 +97,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, isAuthenticated: !!user, login, register, logout, requestPasswordReset, resetPassword }}>
+    <AuthContext.Provider value={{ user, isLoading, isAuthenticated: !!user, login, register, logout, requestPasswordReset, resetPassword, refreshUser: fetchMe }}>
       {children}
     </AuthContext.Provider>
   );

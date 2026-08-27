@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "Mlo Wangu",
+    "slug": "mlo-wangu",
+    "scheme": "mlowangu",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#FAF8F2",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.mlowangu.app"
+    },
+    "android": {
+      "package": "com.mlowangu.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#FFFFFF",
+        "foregroundImage": "./assets/android-icon-foreground.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 220,
+          "resizeMode": "contain",
+          "backgroundColor": "#FAF8F2"
+        }
+      ],
+      "expo-font",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#14532D"
+        }
+      ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "92ee4603-f95a-4577-8b2a-57712a7cb6af"
+      }
+    },
+    "owner": "mlowangus-team"
+  }
+}
