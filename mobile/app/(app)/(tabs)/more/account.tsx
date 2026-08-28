@@ -20,6 +20,7 @@ import { Button } from '../../../../components/Button';
 import { useAuth } from '../../../../context/AuthContext';
 import { useFinancialSession } from '../../../../context/FinancialSessionContext';
 import { api, ApiError } from '../../../../lib/api';
+import { checkForUpdates, downloadAndApplyUpdate, getOtaDebugInfo } from '../../../../lib/otaUpdates';
 import { colors, spacing } from '../../../../constants/theme';
 
 export default function AccountScreen() {
@@ -42,6 +43,10 @@ export default function AccountScreen() {
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [deleteStatus, setDeleteStatus] = useState<'idle' | 'deleting' | 'error'>('idle');
   const [deleteError, setDeleteError] = useState('');
+
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'applying' | 'up-to-date' | 'unsupported' | 'error'>('idle');
+  const [updateMessage, setUpdateMessage] = useState('');
+  const otaInfo = getOtaDebugInfo();
 
   const saveName = async () => {
     setNameStatus('saving');
@@ -99,6 +104,46 @@ export default function AccountScreen() {
       setExportStatus('error');
       setExportError(err instanceof ApiError ? err.message : 'Could not export your data. Please try again.');
     }
+  };
+
+  // Explicit, user-initiated update check — the ONLY path in the app that
+  // can trigger an OTA reload (see mobile/lib/otaUpdates.ts's module
+  // header for why the automatic background check never force-reloads).
+  // Since this only runs when the user taps this button from Settings,
+  // it can never interrupt a payment/financial/deletion/generation flow.
+  const handleCheckForUpdates = async () => {
+    if (updateStatus === 'checking' || updateStatus === 'applying') return;
+    setUpdateStatus('checking');
+    setUpdateMessage('');
+    const check = await checkForUpdates();
+    if (check.status === 'unsupported') {
+      setUpdateStatus('unsupported');
+      setUpdateMessage('Updates are unavailable in this build (development mode).');
+      return;
+    }
+    if (check.status === 'error') {
+      setUpdateStatus('error');
+      setUpdateMessage(check.message);
+      return;
+    }
+    if (check.status === 'up-to-date') {
+      setUpdateStatus('up-to-date');
+      setUpdateMessage("You're up to date.");
+      return;
+    }
+    // An update is available — download and apply it now that we know
+    // this is an explicit, user-initiated action.
+    setUpdateStatus('applying');
+    setUpdateMessage('Update available — restarting to apply…');
+    const apply = await downloadAndApplyUpdate();
+    if (apply.status === 'error') {
+      setUpdateStatus('error');
+      setUpdateMessage(apply.message);
+    } else if (apply.status === 'up-to-date') {
+      setUpdateStatus('up-to-date');
+      setUpdateMessage("You're up to date.");
+    }
+    // 'applied' reloads the app itself — no further state update needed.
   };
 
   const handleDeleteAccount = async () => {
@@ -167,6 +212,27 @@ export default function AccountScreen() {
           onPress={changeEmail}
           loading={emailStatus === 'saving'}
           disabled={!newEmail.trim() || !currentPassword}
+        />
+      </Card>
+
+      <Card style={{ marginTop: spacing.lg }}>
+        <AppText variant="subheading">App updates</AppText>
+        <AppText variant="caption" color={colors.moss} style={{ marginTop: spacing.xs, marginBottom: spacing.sm }}>
+          {otaInfo.isEnabled
+            ? `Running update ${otaInfo.updateId ? otaInfo.updateId.slice(0, 8) : 'embedded'} on channel ${otaInfo.channel ?? 'unknown'}. Small fixes and improvements can be applied this way — bigger changes still need a new app-store update.`
+            : 'Update checking is unavailable in this development build.'}
+        </AppText>
+        {updateMessage ? (
+          <AppText variant="caption" color={updateStatus === 'error' ? colors.danger : colors.moss} style={{ marginBottom: spacing.sm }}>
+            {updateMessage}
+          </AppText>
+        ) : null}
+        <Button
+          label={updateStatus === 'checking' ? 'Checking…' : updateStatus === 'applying' ? 'Applying…' : 'Check for updates'}
+          onPress={handleCheckForUpdates}
+          loading={updateStatus === 'checking' || updateStatus === 'applying'}
+          disabled={!otaInfo.isEnabled}
+          variant="secondary"
         />
       </Card>
 

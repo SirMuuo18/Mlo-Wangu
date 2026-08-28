@@ -43,7 +43,8 @@
           "icon": "./assets/icon.png",
           "color": "#14532D"
         }
-      ]
+      ],
+      "expo-updates"
     ],
     "extra": {
       "router": {},
@@ -51,6 +52,14 @@
         "projectId": "92ee4603-f95a-4577-8b2a-57712a7cb6af"
       }
     },
-    "owner": "mlowangus-team"
+    "owner": "mlowangus-team",
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/92ee4603-f95a-4577-8b2a-57712a7cb6af",
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
+    }
   }
 }
