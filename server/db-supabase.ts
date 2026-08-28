@@ -851,28 +851,33 @@ export class SupabaseDatabaseAdapter implements IDatabaseAdapter {
       householdId: (row.household_id as string) ?? null,
       weekStartDate: row.week_start_date as string,
       createdAt: row.created_at as string,
+      isStarred: Boolean(row.is_starred),
       days,
     };
   }
 
-  // Find-or-create the meal_plans row for (userId, weekStartDate), then
-  // replace its slots wholesale — mirrors the existing setBudget/
-  // setHouseholdMembers "delete children, reinsert" pattern above.
+  // Upserts the meal_plans parent row atomically (ON CONFLICT (user_id,
+  // week_start_date)) instead of the previous select-then-insert-or-update,
+  // which had a TOCTOU gap two near-simultaneous generations could race
+  // through. Slot replacement below ("delete children, reinsert", same
+  // pattern as setBudget/setHouseholdMembers) is additionally serialized by
+  // the per-user generation lock at the route level (see
+  // claimGenerationLock) so two concurrent saves for the same week can't
+  // interleave their slot writes either.
   async saveMealPlan(plan: MealPlanSaveInput): Promise<MealPlanRecord> {
     const { data: existing } = await this.db.from('meal_plans')
-      .select('id').eq('user_id', plan.userId).eq('week_start_date', plan.weekStartDate).maybeSingle();
-
-    let planId: string;
-    if (existing?.id) {
-      planId = existing.id as string;
-      await this.db.from('meal_plans').update({ household_id: plan.householdId }).eq('id', planId);
-    } else {
-      const { data: inserted, error } = await this.db.from('meal_plans').insert({
-        user_id: plan.userId, household_id: plan.householdId, week_start_date: plan.weekStartDate,
-      }).select('id').single();
-      if (error || !inserted) throw new Error(`Failed to create meal plan: ${error?.message}`);
-      planId = (inserted as Record<string, unknown>).id as string;
+      .select('is_starred').eq('user_id', plan.userId).eq('week_start_date', plan.weekStartDate).maybeSingle();
+    if (existing && (existing as Record<string, unknown>).is_starred) {
+      throw new Error('STARRED_WEEK_PROTECTED');
     }
+
+    const { data: upserted, error } = await this.db.from('meal_plans')
+      .upsert(
+        { user_id: plan.userId, household_id: plan.householdId, week_start_date: plan.weekStartDate },
+        { onConflict: 'user_id,week_start_date' },
+      ).select('id').single();
+    if (error || !upserted) throw new Error(`Failed to save meal plan: ${error?.message}`);
+    const planId = (upserted as Record<string, unknown>).id as string;
 
     await this.db.from('meal_plan_slots').delete().eq('meal_plan_id', planId);
     const slotRows: Record<string, unknown>[] = [];
@@ -887,6 +892,78 @@ export class SupabaseDatabaseAdapter implements IDatabaseAdapter {
     const saved = await this.getMealPlan(plan.userId, plan.weekStartDate);
     if (!saved) throw new Error('Failed to read back saved meal plan');
     return saved;
+  }
+
+  // ── Meal-Plan History / Anti-Repeat / Starring ───────────────────────────
+  async getMealUsageHistory(userId: string, weeksBack: number, beforeWeekStartDate: string): Promise<{ mealId: string; count: number }[]> {
+    const before = new Date(`${beforeWeekStartDate}T00:00:00Z`);
+    const cutoff = new Date(before.getTime() - weeksBack * 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    const { data: plans } = await this.db.from('meal_plans')
+      .select('id').eq('user_id', userId).gte('week_start_date', cutoff).lt('week_start_date', beforeWeekStartDate);
+    const planIds = (plans ?? []).map((p) => (p as Record<string, unknown>).id as string);
+    if (planIds.length === 0) return [];
+
+    const { data: slots } = await this.db.from('meal_plan_slots').select('meal_id').in('meal_plan_id', planIds);
+    const counts = new Map<string, number>();
+    for (const row of slots ?? []) {
+      const mealId = (row as Record<string, unknown>).meal_id as string | null;
+      if (!mealId) continue;
+      counts.set(mealId, (counts.get(mealId) || 0) + 1);
+    }
+    return [...counts.entries()].map(([mealId, count]) => ({ mealId, count }));
+  }
+
+  async getPreviousWeekMealIds(userId: string, beforeWeekStartDate: string): Promise<string[] | null> {
+    const { data: plan } = await this.db.from('meal_plans')
+      .select('id').eq('user_id', userId).lt('week_start_date', beforeWeekStartDate)
+      .order('week_start_date', { ascending: false }).limit(1).maybeSingle();
+    if (!plan) return null;
+    const planId = (plan as Record<string, unknown>).id as string;
+    const { data: slots } = await this.db.from('meal_plan_slots').select('meal_id').eq('meal_plan_id', planId);
+    return (slots ?? []).map((r) => (r as Record<string, unknown>).meal_id as string).filter(Boolean);
+  }
+
+  async setMealPlanStarred(userId: string, weekStartDate: string, starred: boolean): Promise<boolean> {
+    const { data, error } = await this.db.from('meal_plans')
+      .update({ is_starred: starred }).eq('user_id', userId).eq('week_start_date', weekStartDate).select('id');
+    if (error) return false;
+    return (data?.length ?? 0) > 0;
+  }
+
+  async getStarredMealIds(userId: string): Promise<Set<string>> {
+    const { data } = await this.db.from('starred_meals').select('meal_id').eq('user_id', userId);
+    return new Set((data ?? []).map((r) => (r as Record<string, unknown>).meal_id as string));
+  }
+
+  async starMeal(userId: string, mealId: string): Promise<void> {
+    await this.db.from('starred_meals').upsert({ user_id: userId, meal_id: mealId }, { onConflict: 'user_id,meal_id' });
+  }
+
+  async unstarMeal(userId: string, mealId: string): Promise<void> {
+    await this.db.from('starred_meals').delete().eq('user_id', userId).eq('meal_id', mealId);
+  }
+
+  // CAS-style: the INSERT itself is the atomic claim (a unique-violation on
+  // user_id means another live claim exists). A claim older than
+  // staleAfterMs is assumed abandoned (crashed request that never released)
+  // and is reclaimed via a conditional delete-then-retry rather than
+  // deadlocking generation for that user forever.
+  async claimGenerationLock(userId: string, staleAfterMs: number): Promise<boolean> {
+    const { error } = await this.db.from('meal_plan_generation_locks').insert({ user_id: userId });
+    if (!error) return true;
+
+    const staleCutoff = new Date(Date.now() - staleAfterMs).toISOString();
+    const { data: reclaimed } = await this.db.from('meal_plan_generation_locks')
+      .delete().eq('user_id', userId).lt('claimed_at', staleCutoff).select('user_id');
+    if (!reclaimed || reclaimed.length === 0) return false;
+
+    const { error: retryError } = await this.db.from('meal_plan_generation_locks').insert({ user_id: userId });
+    return !retryError;
+  }
+
+  async releaseGenerationLock(userId: string): Promise<void> {
+    await this.db.from('meal_plan_generation_locks').delete().eq('user_id', userId);
   }
 
   // ── Shopping Lists ────────────────────────────────────────────────────────

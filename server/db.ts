@@ -300,6 +300,13 @@ export function getCurrentYearMonth(): string {
 // Database Manager Class
 class DatabaseManager {
   private data: DatabaseSchema;
+  // Dev-mode-only, in-memory, not persisted to the JSON file: starred
+  // individual meals and short-lived generation locks. JSON mode is a
+  // single-process local dev convenience, not the production path
+  // (USE_JSON_DB=false in production), so these don't need file durability
+  // or real cross-process locking the way the Supabase-backed equivalents do.
+  private starredMeals = new Map<string, Set<string>>();
+  private generationLocks = new Map<string, number>();
 
   constructor() {
     this.ensureDataDirectory();
@@ -646,6 +653,7 @@ class DatabaseManager {
   public saveMealPlan(plan: WeeklyMealPlan) {
     const idx = this.data.mealPlans.findIndex((p) => p.id === plan.id || (p.userId === plan.userId && p.weekStartDate === plan.weekStartDate));
     if (idx !== -1) {
+      if (this.data.mealPlans[idx].isStarred) throw new Error('STARRED_WEEK_PROTECTED');
       this.data.mealPlans[idx] = plan;
     } else {
       this.data.mealPlans.push(plan);
@@ -661,6 +669,70 @@ class DatabaseManager {
     });
     this.saveData();
     return plan;
+  }
+
+  // ── Meal-Plan History / Anti-Repeat / Starring (JSON dev-mode parity) ────
+  public getMealUsageHistory(userId: string, weeksBack: number, beforeWeekStartDate: string): { mealId: string; count: number }[] {
+    const before = new Date(`${beforeWeekStartDate}T00:00:00Z`).getTime();
+    const cutoff = before - weeksBack * 7 * 24 * 60 * 60 * 1000;
+    const counts = new Map<string, number>();
+    for (const p of this.data.mealPlans) {
+      if (p.userId !== userId) continue;
+      const t = new Date(`${p.weekStartDate}T00:00:00Z`).getTime();
+      if (t < cutoff || t >= before) continue;
+      for (const day of Object.values(p.days)) {
+        for (const meal of [day.breakfast, day.lunch, day.dinner, day.snack]) {
+          if (meal) counts.set(meal.id, (counts.get(meal.id) || 0) + 1);
+        }
+      }
+    }
+    return [...counts.entries()].map(([mealId, count]) => ({ mealId, count }));
+  }
+
+  public getPreviousWeekMealIds(userId: string, beforeWeekStartDate: string): string[] | null {
+    const prior = this.data.mealPlans
+      .filter((p) => p.userId === userId && p.weekStartDate < beforeWeekStartDate)
+      .sort((a, b) => (a.weekStartDate < b.weekStartDate ? 1 : -1))[0];
+    if (!prior) return null;
+    const ids: string[] = [];
+    for (const day of Object.values(prior.days)) {
+      for (const meal of [day.breakfast, day.lunch, day.dinner, day.snack]) {
+        if (meal) ids.push(meal.id);
+      }
+    }
+    return ids;
+  }
+
+  public setMealPlanStarred(userId: string, weekStartDate: string, starred: boolean): boolean {
+    const plan = this.data.mealPlans.find((p) => p.userId === userId && p.weekStartDate === weekStartDate);
+    if (!plan) return false;
+    plan.isStarred = starred;
+    this.saveData();
+    return true;
+  }
+
+  public getStarredMealIds(userId: string): Set<string> {
+    return new Set(this.starredMeals.get(userId) ?? []);
+  }
+
+  public starMeal(userId: string, mealId: string): void {
+    if (!this.starredMeals.has(userId)) this.starredMeals.set(userId, new Set());
+    this.starredMeals.get(userId)!.add(mealId);
+  }
+
+  public unstarMeal(userId: string, mealId: string): void {
+    this.starredMeals.get(userId)?.delete(mealId);
+  }
+
+  public claimGenerationLock(userId: string, staleAfterMs: number): boolean {
+    const existing = this.generationLocks.get(userId);
+    if (existing !== undefined && Date.now() - existing < staleAfterMs) return false;
+    this.generationLocks.set(userId, Date.now());
+    return true;
+  }
+
+  public releaseGenerationLock(userId: string): void {
+    this.generationLocks.delete(userId);
   }
 
   // Household — see getMealPlan note above: no cross-user fallback.

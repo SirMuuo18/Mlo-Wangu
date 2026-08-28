@@ -24,6 +24,7 @@ export const queryClient = new QueryClient({
 // instead of hand-typing the same array in multiple screens/hooks.
 export const queryKeys = {
   mealPlan: ['mealPlan', 'current'] as const,
+  starredMeals: ['meals', 'starred'] as const,
   meals: (params?: { category?: string; costLevel?: string; search?: string }) => ['meals', params ?? {}] as const,
   meal: (id: string) => ['meals', 'detail', id] as const,
   entitlementStatus: ['mealPlan', 'entitlementStatus'] as const,

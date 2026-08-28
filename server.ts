@@ -962,6 +962,14 @@ app.get('/api/meals', optionalAuth, async (req: Request, res: Response) => {
   res.json({ meals });
 });
 
+// Registered BEFORE /api/meals/:id — otherwise Express would match "starred"
+// as the :id param and this route would never be reached.
+app.get('/api/meals/starred', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const starredIds = await contentDb.getStarredMealIds(userId);
+  res.json({ mealIds: [...starredIds] });
+});
+
 app.get('/api/meals/:id', optionalAuth, async (req: Request, res: Response) => {
   const meal = await contentDb.getMealById(req.params.id, res.locals.userId);
   if (!meal) {
@@ -1056,6 +1064,27 @@ app.delete('/api/meals/:id', requireAuth, async (req: Request, res: Response) =>
   res.json({ success: true, message: 'Meal deleted successfully' });
 });
 
+// Meal starring (Meal-Variety Engine v1) — "I liked this meal, it's OK to
+// see it again sometimes." Starring does NOT bypass same-week/same-day
+// distinctness, only softens the cross-week history penalty (see
+// generateAndSaveMealPlanLocked). userId always comes from the verified
+// session, never the request body. (GET /api/meals/starred is registered
+// earlier, above GET /api/meals/:id — see that route's comment.)
+app.post('/api/meals/:id/star', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const { id } = req.params;
+  const meal = await contentDb.getMealById(id, userId);
+  if (!meal) return res.status(404).json({ error: 'Meal not found' });
+  await contentDb.starMeal(userId, id);
+  res.json({ success: true });
+});
+
+app.delete('/api/meals/:id/star', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  await contentDb.unstarMeal(userId, req.params.id);
+  res.json({ success: true });
+});
+
 // "What Can I Cook With KSh X?" Endpoint (Supports custom unconstrained budgets & unbounded portions)
 app.post('/api/meals/what-can-i-cook', optionalAuth, async (req: Request, res: Response) => {
   const { budgetKsh, householdSize = 4, ingredients = [] } = req.body;
@@ -1119,6 +1148,24 @@ app.get('/api/meal-plans/current', requireAuth, async (req: Request, res: Respon
   res.json({ mealPlan: plan });
 });
 
+// Week starring (Meal-Variety Engine v1) — protects a saved week from being
+// silently overwritten by a future regeneration for that same week (see
+// saveMealPlan's STARRED_WEEK_PROTECTED check) and excludes it from the
+// week-similarity novelty comparison used by future generations.
+app.post('/api/meal-plans/:weekStartDate/star', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const ok = await contentDb.setMealPlanStarred(userId, req.params.weekStartDate, true);
+  if (!ok) return res.status(404).json({ error: 'No saved meal plan found for that week.' });
+  res.json({ success: true });
+});
+
+app.delete('/api/meal-plans/:weekStartDate/star', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const ok = await contentDb.setMealPlanStarred(userId, req.params.weekStartDate, false);
+  if (!ok) return res.status(404).json({ error: 'No saved meal plan found for that week.' });
+  res.json({ success: true });
+});
+
 app.put('/api/meal-plans/current', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   const updatedPlan = req.body.mealPlan;
@@ -1126,8 +1173,15 @@ app.put('/api/meal-plans/current', requireAuth, async (req: Request, res: Respon
     return res.status(400).json({ error: 'Missing mealPlan body' });
   }
   updatedPlan.userId = userId;
-  const saved = await contentDb.saveMealPlan(updatedPlan);
-  res.json({ mealPlan: saved });
+  try {
+    const saved = await contentDb.saveMealPlan(updatedPlan);
+    res.json({ mealPlan: saved });
+  } catch (err: any) {
+    if (err?.message === 'STARRED_WEEK_PROTECTED') {
+      return res.status(409).json({ error: 'This week is starred and protected from being overwritten. Unstar it first.' });
+    }
+    throw err;
+  }
 });
 
 // Auto-generate a balanced, family-tailored weekly meal plan.
@@ -1184,7 +1238,32 @@ app.post('/api/meal-plans/generate', requireAuth, async (req: Request, res: Resp
   }
 });
 
+// Bumped whenever the generation algorithm's scoring/selection logic
+// changes materially — persisted per-response so a future developer (or
+// support) can tell which algorithm version produced a given plan without
+// guessing from the timestamp alone.
+const MEAL_PLAN_GENERATOR_VERSION = 2;
+
 async function generateAndSaveMealPlan(userId: string, res: Response) {
+  // Premium users' generation path has no entitlement-claim CAS guard (only
+  // the pay-per-generation path does), so two near-simultaneous requests
+  // could otherwise interleave writes for the same week. A stale claim
+  // (e.g. a crashed request that never released) is reclaimed after 30s —
+  // generation itself normally completes in well under a second.
+  const lockClaimed = await contentDb.claimGenerationLock(userId, 30_000);
+  if (!lockClaimed) {
+    res.status(409).json({ error: 'A meal plan is already being generated. Please wait a moment and try again.' });
+    return;
+  }
+
+  try {
+    await generateAndSaveMealPlanLocked(userId, res);
+  } finally {
+    await contentDb.releaseGenerationLock(userId);
+  }
+}
+
+async function generateAndSaveMealPlanLocked(userId: string, res: Response) {
   const household = await secureDb.getHousehold(userId);
 
   const householdSize = household?.members.length || 4;
@@ -1192,9 +1271,18 @@ async function generateAndSaveMealPlan(userId: string, res: Response) {
   // Collect all allergies and dislikes across household members
   const allergens = new Set<string>();
   const dislikes = new Set<string>();
+  // Free-text preference/nutrition-goal signals (Meal-Variety Engine v1) —
+  // these fields already existed on every household member but were never
+  // read by generation before now. Matched the same way allergies/dislikes
+  // already are: a case-insensitive substring match against the meal's
+  // name/tags/ingredients text, never a fabricated medical inference.
+  const preferenceKeywords = new Set<string>();
+  let nutritionGoalsText = '';
   (household?.members || []).forEach((m) => {
     (m.allergies || []).forEach((a) => allergens.add(a.toLowerCase()));
     (m.dislikes || []).forEach((d) => dislikes.add(d.toLowerCase()));
+    (m.preferences || []).forEach((p) => preferenceKeywords.add(p.toLowerCase()));
+    if (m.nutritionGoals) nutritionGoalsText += ` ${m.nutritionGoals.toLowerCase()}`;
   });
 
   // Get food budget from saved budget (if available) for cost-aware selection
@@ -1204,9 +1292,56 @@ async function generateAndSaveMealPlan(userId: string, res: Response) {
   const maxPerMeal = weeklyFoodBudget === Infinity ? Infinity : Math.round(weeklyFoodBudget / 21); // 3 meals × 7 days
 
   const allMeals = await contentDb.getMeals(userId);
+  const weekStartDate = getMondayOfCurrentWeek();
 
-  function scoreMeal(meal: typeof allMeals[0], usedIds: Set<string>): number {
-    if (usedIds.has(meal.id)) return -1000; // strong penalty for repeats
+  // Meal-Variety Engine v1: cross-week anti-repeat + starring. History is
+  // bounded to the last 4 saved weeks (never a full lifetime scan — see the
+  // architecture proposal). A starred meal's historical occurrences count
+  // for much less, since starring means "I liked this, it's OK to see it
+  // again sometimes" — not "repeat it every week."
+  const HISTORY_WEEKS = 4;
+  const STARRED_HISTORY_WEIGHT = 0.25;
+  const [rawHistory, starredMealIds, previousWeekMealIds] = await Promise.all([
+    contentDb.getMealUsageHistory(userId, HISTORY_WEEKS, weekStartDate),
+    contentDb.getStarredMealIds(userId),
+    contentDb.getPreviousWeekMealIds(userId, weekStartDate),
+  ]);
+  const historicalMealCounts = new Map<string, number>(
+    rawHistory.map(({ mealId, count }) => [mealId, starredMealIds.has(mealId) ? count * STARRED_HISTORY_WEIGHT : count]),
+  );
+
+  // Ingredient names common enough to appear in nearly every dish (seasoning,
+  // aromatics, staples used as garnish) — excluded from the "dominant
+  // ingredient" keywords below so they don't falsely trigger the
+  // repetition/variety penalties for e.g. every dish that contains onion.
+  const INGREDIENT_STOPWORDS = new Set([
+    'salt', 'oil', 'cooking oil', 'vegetable oil', 'onion', 'onions', 'tomato', 'tomatoes',
+    'garlic', 'ginger', 'lemon', 'sugar', 'honey', 'milk', 'water', 'pepper', 'black pepper',
+    'green pepper', 'coriander', 'dhania', 'curry powder', 'royco', 'tomato paste', 'spices',
+    'salt & pepper', 'seasoning', 'stock cube', 'butter', 'ghee',
+  ]);
+
+  // A meal's "dominant" ingredients (e.g. "eggs", "chicken", "rice") drive
+  // the variety penalties below — this catches repetition across DIFFERENT
+  // meal ids that all happen to be egg-based, which plain per-slot
+  // used-id tracking (further below) can't see.
+  function dominantKeywords(meal: typeof allMeals[0]): string[] {
+    return (meal.ingredients || [])
+      .map((i) => i.name.toLowerCase().trim())
+      .filter((n) => n && !INGREDIENT_STOPWORDS.has(n));
+  }
+
+  function scoreMeal(
+    meal: typeof allMeals[0],
+    usedCounts: Map<string, number>,
+    weekKeywordCounts: Map<string, number>,
+    todayKeywords: Set<string>,
+  ): number {
+    const usedCount = usedCounts.get(meal.id) || 0;
+    // Penalty scales with how many times this exact meal was already used
+    // this week, so if a small pool genuinely must repeat, selection rotates
+    // through the available meals instead of collapsing onto a single one.
+    if (usedCount > 0) return -1000 * usedCount;
 
     // Reject meals with allergens/dislikes in name or tags
     const mealText = `${meal.name} ${(meal.tags || []).join(' ')} ${(meal.ingredients || []).map((i) => i.name).join(' ')}`.toLowerCase();
@@ -1227,6 +1362,41 @@ async function generateAndSaveMealPlan(userId: string, res: Response) {
     if (meal.nutrition?.veggieRich) score += 8;
     if (meal.nutrition?.carbRich) score += 5;
 
+    // Personalization (Meal-Variety Engine v1): household members'
+    // free-text `preferences` (e.g. "Enjoys Ugali") matched the same
+    // conservative substring way allergies/dislikes already are — no new
+    // matching mechanism invented. `nutritionGoals` is intentionally only
+    // matched against a small set of recognizable keywords against
+    // EXISTING nutrition flags already in the data, never a fabricated
+    // medical inference.
+    for (const p of preferenceKeywords) { if (mealText.includes(p)) score += 15; }
+    if (nutritionGoalsText.includes('protein') && meal.nutrition?.proteinRich) score += 8;
+    if ((nutritionGoalsText.includes('weight') || nutritionGoalsText.includes('light')) && !meal.nutrition?.carbRich) score += 5;
+    if (nutritionGoalsText.includes('hydrat') && meal.nutrition?.fruitIncluded) score += 5;
+    if ((nutritionGoalsText.includes('vegetable') || nutritionGoalsText.includes('veggie')) && meal.nutrition?.veggieRich) score += 8;
+
+    // Cross-week anti-repeat (Meal-Variety Engine v1): softer than the
+    // same-week exact-repeat block above, since this is "used recently"
+    // rather than "already in this exact week." A starred meal's
+    // historical count already arrives pre-discounted (see
+    // STARRED_HISTORY_WEIGHT above).
+    const historicalCount = historicalMealCounts.get(meal.id) || 0;
+    if (historicalCount > 0) score -= 60 * historicalCount;
+
+    // Keep each day mixed: don't stack the same dominant ingredient (e.g.
+    // eggs for both breakfast and snack) into multiple slots on one day.
+    // Keep the week mixed: softly discourage an ingredient from dominating
+    // across many days, growing stronger with each prior use rather than
+    // banning it outright (some pools are egg-heavy by nature).
+    for (const k of dominantKeywords(meal)) {
+      // Strong enough to reliably beat the max possible budget+nutrition
+      // bonus (~53) so a same-day collision only survives when every
+      // remaining option in that slot's pool also shares the ingredient.
+      if (todayKeywords.has(k)) score -= 70;
+      const weekCount = weekKeywordCounts.get(k) || 0;
+      if (weekCount > 0) score -= 20 * weekCount;
+    }
+
     return score;
   }
 
@@ -1236,39 +1406,141 @@ async function generateAndSaveMealPlan(userId: string, res: Response) {
   const dinners    = allMeals.filter((m) => m.category === 'dinner');
   const snacks     = allMeals.filter((m) => m.category === 'snack');
 
-  function pickBest(pool: typeof allMeals, used: Set<string>): typeof allMeals[0] {
-    const scored = pool.map((m) => ({ m, s: scoreMeal(m, used) })).sort((a, b) => b.s - a.s);
-    const pick = scored[0]?.m || pool[0];
-    used.add(pick.id);
-    return pick;
+  // Historical keyword pressure, at a lighter weight than this week's own
+  // picks (which accumulate at 1 per pick in buildCandidateWeek below) —
+  // recent-week repetition matters less than repetition within the same
+  // week/day.
+  const HISTORICAL_KEYWORD_WEIGHT = 0.5;
+  const historicalKeywordSeed = new Map<string, number>();
+  for (const [mealId, count] of historicalMealCounts) {
+    const meal = allMeals.find((m) => m.id === mealId);
+    if (!meal) continue; // deleted/no-longer-visible meal referenced by old history — skip, not an error
+    dominantKeywords(meal).forEach((k) => {
+      historicalKeywordSeed.set(k, (historicalKeywordSeed.get(k) || 0) + count * HISTORICAL_KEYWORD_WEIGHT);
+    });
   }
 
-  const usedB = new Set<string>();
-  const usedL = new Set<string>();
-  const usedD = new Set<string>();
-  const usedS = new Set<string>();
+  // When a pool is smaller than the week (e.g. fewer snacks than days),
+  // the least-desirable/most-penalized items are unavoidably deferred to
+  // whichever day is processed last for that slot. Shuffling each slot's
+  // day-processing order independently spreads those deferred picks across
+  // different days instead of always dumping them all onto the same day.
+  function shuffledDays(): string[] {
+    const arr = [...days];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
 
-  const newDaysPlan: any = {};
-  days.forEach((day) => {
-    newDaysPlan[day] = {
-      breakfast: pickBest(breakfasts, usedB),
-      lunch:     pickBest(lunches,    usedL),
-      dinner:    pickBest(dinners,    usedD),
-      snack:     pickBest(snacks,     usedS),
-    };
-  });
+  // One full attempt at building a candidate week. Re-runnable so the
+  // week-similarity check below can retry with fresh shuffling when a
+  // candidate lands too close to the immediately preceding week.
+  function buildCandidateWeek(): any {
+    const weekKeywordCounts = new Map(historicalKeywordSeed);
+    const todayKeywordsByDay = new Map<string, Set<string>>(days.map((d) => [d, new Set<string>()]));
+
+    function pickBest(pool: typeof allMeals, used: Map<string, number>, day: string): typeof allMeals[0] {
+      const todayKeywords = todayKeywordsByDay.get(day)!;
+      const scored = pool.map((m) => ({ m, s: scoreMeal(m, used, weekKeywordCounts, todayKeywords) })).sort((a, b) => b.s - a.s);
+      const pick = scored[0]?.m || pool[0];
+      used.set(pick.id, (used.get(pick.id) || 0) + 1);
+      dominantKeywords(pick).forEach((k) => {
+        weekKeywordCounts.set(k, (weekKeywordCounts.get(k) || 0) + 1);
+        todayKeywords.add(k);
+      });
+      return pick;
+    }
+
+    const usedB = new Map<string, number>();
+    const usedL = new Map<string, number>();
+    const usedD = new Map<string, number>();
+    const usedS = new Map<string, number>();
+
+    const candidate: any = {};
+    days.forEach((day) => { candidate[day] = {}; });
+    shuffledDays().forEach((day) => { candidate[day].breakfast = pickBest(breakfasts, usedB, day); });
+    shuffledDays().forEach((day) => { candidate[day].lunch    = pickBest(lunches,    usedL, day); });
+    shuffledDays().forEach((day) => { candidate[day].dinner   = pickBest(dinners,    usedD, day); });
+    shuffledDays().forEach((day) => { candidate[day].snack    = pickBest(snacks,     usedS, day); });
+    return candidate;
+  }
+
+  function candidateMealIds(candidate: any): string[] {
+    const ids: string[] = [];
+    for (const day of days) {
+      for (const slot of ['breakfast', 'lunch', 'dinner', 'snack'] as const) {
+        const meal = candidate[day]?.[slot];
+        if (meal) ids.push(meal.id);
+      }
+    }
+    return ids;
+  }
+
+  // Week-level novelty (Meal-Variety Engine v1): reject/retry a candidate
+  // that overlaps too heavily with the immediately preceding week, rather
+  // than only guarding within the week being built. Bounded to a handful
+  // of attempts — never an unbounded search for a "perfect" week (see
+  // architecture proposal's scale/performance section); the least-similar
+  // attempt found is used even if none clears the threshold.
+  const WEEK_SIMILARITY_THRESHOLD = 0.5; // Jaccard overlap ratio
+  const MAX_GENERATION_ATTEMPTS = 3;
+  const previousWeekIdSet: Set<string> | null = previousWeekMealIds ? new Set<string>(previousWeekMealIds) : null;
+
+  function jaccardSimilarity(a: string[], previous: Set<string>): number {
+    const setA = new Set(a);
+    let intersection = 0;
+    for (const id of setA) { if (previous.has(id)) intersection++; }
+    const union = new Set([...setA, ...previous]).size;
+    return union === 0 ? 0 : intersection / union;
+  }
+
+  let bestCandidate = buildCandidateWeek();
+  let bestSimilarity = previousWeekIdSet ? jaccardSimilarity(candidateMealIds(bestCandidate), previousWeekIdSet) : 0;
+  let attemptsUsed = 1;
+  if (previousWeekIdSet) {
+    for (let attempt = 2; attempt <= MAX_GENERATION_ATTEMPTS && bestSimilarity > WEEK_SIMILARITY_THRESHOLD; attempt++) {
+      const candidate = buildCandidateWeek();
+      const similarity = jaccardSimilarity(candidateMealIds(candidate), previousWeekIdSet);
+      attemptsUsed = attempt;
+      if (similarity < bestSimilarity) { bestCandidate = candidate; bestSimilarity = similarity; }
+    }
+  }
+  const newDaysPlan = bestCandidate;
 
   const newPlan = {
     id: `mp_${Date.now()}`,
     userId,
     householdId: household?.id || 'hh_default',
-    weekStartDate: getMondayOfCurrentWeek(),
+    weekStartDate,
     days: newDaysPlan,
     createdAt: new Date().toISOString(),
   };
 
-  const saved = await contentDb.saveMealPlan(newPlan as any);
-  res.json({ mealPlan: saved, householdSize, weeklyFoodBudgetKsh: weeklyFoodBudget === Infinity ? null : weeklyFoodBudget });
+  let saved;
+  try {
+    saved = await contentDb.saveMealPlan(newPlan as any);
+  } catch (err: any) {
+    if (err?.message === 'STARRED_WEEK_PROTECTED') {
+      res.status(409).json({ error: 'This week is starred and protected from being overwritten. Unstar it first if you want to regenerate.' });
+      return;
+    }
+    throw err;
+  }
+
+  res.json({
+    mealPlan: saved,
+    householdSize,
+    weeklyFoodBudgetKsh: weeklyFoodBudget === Infinity ? null : weeklyFoodBudget,
+    generationMeta: {
+      generatorVersion: MEAL_PLAN_GENERATOR_VERSION,
+      generatedAt: newPlan.createdAt,
+      historyWeeksConsidered: HISTORY_WEEKS,
+      similarityToPreviousWeek: previousWeekIdSet ? Math.round(bestSimilarity * 100) / 100 : null,
+      generationAttempts: attemptsUsed,
+    },
+  });
 }
 
 // Swap a single meal with intelligent Kenyan recommendations
@@ -1295,7 +1567,14 @@ app.post('/api/meal-plans/swap', requireAuth, async (req: Request, res: Response
 
   if (currentPlan.days[day as any]) {
     (currentPlan.days as any)[day][mealType] = selectedMeal;
-    await contentDb.saveMealPlan(currentPlan);
+    try {
+      await contentDb.saveMealPlan(currentPlan);
+    } catch (err: any) {
+      if (err?.message === 'STARRED_WEEK_PROTECTED') {
+        return res.status(409).json({ error: 'This week is starred and protected from being overwritten. Unstar it first.' });
+      }
+      throw err;
+    }
   }
 
   res.json({ mealPlan: currentPlan, swappedMeal: selectedMeal });

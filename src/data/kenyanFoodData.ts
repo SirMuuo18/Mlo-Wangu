@@ -1804,6 +1804,203 @@ export const KENYAN_MEALS: Meal[] = [
       approxCalories: 490,
     },
     tags: ['Quick Dinner', 'Iron Rich', 'Budget Friendly'],
+  },
+
+  // 33
+  {
+    id: 'meal_uji_wa_mahindi_groundnuts',
+    name: 'Uji wa Mahindi (Maize Porridge) with Roasted Groundnuts',
+    swahiliName: 'Uji wa Mahindi na Njugu Karanga',
+    category: 'breakfast',
+    prepTimeMinutes: 15,
+    estimatedCostKsh: 95,
+    costLevel: 'budget',
+    servings: 4,
+    description: 'Smooth, naturally sweetened maize-flour porridge topped with crushed roasted groundnuts for a hearty, egg-free start to the day.',
+    ingredients: [
+      { name: 'Maize Flour', quantity: 200, unit: 'g', estimatedCostKsh: 30 },
+      { name: 'Roasted Groundnuts (crushed)', quantity: 100, unit: 'g', estimatedCostKsh: 35 },
+      { name: 'Sugar/Honey', quantity: 1, unit: 'portion', estimatedCostKsh: 15 },
+      { name: 'Milk', quantity: 250, unit: 'ml', estimatedCostKsh: 15 },
+    ],
+    instructions: [
+      'Mix maize flour with cold water into a smooth, lump-free paste.',
+      'Pour into boiling water while stirring continuously, then simmer for 10 minutes until thick.',
+      'Stir in milk and sweeten to taste.',
+      'Serve hot, topped generously with crushed roasted groundnuts.',
+    ],
+    nutrition: {
+      proteinRich: false,
+      carbRich: true,
+      veggieRich: false,
+      fruitIncluded: false,
+      approxCalories: 340,
+    },
+    tags: ['Egg-Free', 'Comfort Breakfast', 'Budget Friendly'],
+  },
+
+  // 34
+  {
+    id: 'meal_mkate_wa_sinia_chai',
+    name: 'Mkate wa Sinia (Kenyan Coconut Rice Bread) with Milk Tea',
+    swahiliName: 'Mkate wa Sinia na Chai ya Maziwa',
+    category: 'breakfast',
+    prepTimeMinutes: 30,
+    estimatedCostKsh: 140,
+    costLevel: 'budget',
+    servings: 4,
+    description: 'Soft, coconut-scented steamed rice bread from the Coast, paired with a cup of spiced Kenyan milk tea — a filling, egg-free breakfast.',
+    ingredients: [
+      { name: 'Rice Flour', quantity: 250, unit: 'g', estimatedCostKsh: 45 },
+      { name: 'Coconut Milk', quantity: 300, unit: 'ml', estimatedCostKsh: 50 },
+      { name: 'Yeast/Baking Powder', quantity: 1, unit: 'portion', estimatedCostKsh: 15 },
+      { name: 'Tea Leaves & Milk', quantity: 1, unit: 'portion', estimatedCostKsh: 30 },
+    ],
+    instructions: [
+      'Mix rice flour, coconut milk, sugar, and yeast into a smooth batter and let it rise for 20 minutes.',
+      'Pour into a greased tray and steam for 25-30 minutes until set and springy.',
+      'Slice into squares once cooled slightly.',
+      'Serve warm alongside a cup of spiced Kenyan milk tea.',
+    ],
+    nutrition: {
+      proteinRich: false,
+      carbRich: true,
+      veggieRich: false,
+      fruitIncluded: false,
+      approxCalories: 380,
+    },
+    tags: ['Egg-Free', 'Coastal Delicacy', 'Family Favorite'],
+  },
+
+  // 35
+  {
+    id: 'meal_njugu_karanga_chai',
+    name: 'Roasted Groundnuts (Njugu Karanga) with Spiced Chai',
+    swahiliName: 'Njugu Karanga na Chai ya Tangawizi',
+    category: 'snack',
+    prepTimeMinutes: 10,
+    estimatedCostKsh: 60,
+    costLevel: 'budget',
+    servings: 4,
+    description: 'A classic Kenyan tea-time snack — crunchy roasted groundnuts served alongside hot, spiced ginger tea.',
+    ingredients: [
+      { name: 'Raw Groundnuts', quantity: 250, unit: 'g', estimatedCostKsh: 45 },
+      { name: 'Tea Leaves, Milk & Ginger', quantity: 1, unit: 'portion', estimatedCostKsh: 15 },
+    ],
+    instructions: [
+      'Dry-roast groundnuts in a pan over medium heat, stirring frequently, until golden and fragrant.',
+      'Let cool slightly, then rub off loose skins if desired.',
+      'Brew a pot of spiced ginger tea with milk.',
+      'Serve the warm groundnuts alongside the hot tea.',
+    ],
+    nutrition: {
+      proteinRich: true,
+      carbRich: false,
+      veggieRich: false,
+      fruitIncluded: false,
+      approxCalories: 260,
+    },
+    tags: ['Egg-Free', 'Tea-Time Classic', 'Budget Friendly'],
+  },
+
+  // 36
+  {
+    id: 'meal_mandazi_ginger_tea',
+    name: 'Kenyan Mandazi (Sweet Fried Bread) with Ginger Tea',
+    swahiliName: 'Mandazi na Chai ya Tangawizi',
+    category: 'snack',
+    prepTimeMinutes: 40,
+    estimatedCostKsh: 110,
+    costLevel: 'budget',
+    servings: 4,
+    description: 'Lightly sweet, coconut-scented fried dough triangles — a beloved Kenyan tea-time treat, best enjoyed fresh and warm.',
+    ingredients: [
+      { name: 'Wheat Flour', quantity: 300, unit: 'g', estimatedCostKsh: 40 },
+      { name: 'Coconut Milk', quantity: 150, unit: 'ml', estimatedCostKsh: 30 },
+      { name: 'Sugar & Cardamom', quantity: 1, unit: 'portion', estimatedCostKsh: 15 },
+      { name: 'Cooking Oil (for frying)', quantity: 500, unit: 'ml', estimatedCostKsh: 25 },
+    ],
+    instructions: [
+      'Mix flour, sugar, cardamom, and coconut milk into a soft dough. Knead well and rest for 30 minutes.',
+      'Roll out and cut into triangles.',
+      'Deep-fry in hot oil until golden brown on both sides.',
+      'Drain and serve warm with spiced ginger tea.',
+    ],
+    nutrition: {
+      proteinRich: false,
+      carbRich: true,
+      veggieRich: false,
+      fruitIncluded: false,
+      approxCalories: 310,
+    },
+    tags: ['Egg-Free', 'Tea-Time Classic', 'Sweet Treat'],
+  },
+
+  // 37
+  {
+    id: 'meal_bhajia_kachumbari_snack',
+    name: 'Bhajia (Spiced Potato Fritters) with Kachumbari',
+    swahiliName: 'Bhajia na Kachumbari',
+    category: 'snack',
+    prepTimeMinutes: 25,
+    estimatedCostKsh: 130,
+    costLevel: 'budget',
+    servings: 4,
+    description: 'Thinly sliced potatoes coated in a spiced gram-flour batter and deep-fried until crisp, served with fresh tomato-onion kachumbari.',
+    ingredients: [
+      { name: 'Potatoes', quantity: 500, unit: 'g', estimatedCostKsh: 40 },
+      { name: 'Gram Flour (Besan)', quantity: 150, unit: 'g', estimatedCostKsh: 40 },
+      { name: 'Turmeric & Chili Powder', quantity: 1, unit: 'portion', estimatedCostKsh: 15 },
+      { name: 'Tomato, Onion & Lime (Kachumbari)', quantity: 1, unit: 'portion', estimatedCostKsh: 20 },
+      { name: 'Cooking Oil (for frying)', quantity: 500, unit: 'ml', estimatedCostKsh: 25 },
+    ],
+    instructions: [
+      'Slice potatoes thinly and pat dry.',
+      'Whisk gram flour with turmeric, chili powder, and water into a smooth batter.',
+      'Dip potato slices in batter and deep-fry until golden and crisp.',
+      'Serve hot with freshly chopped kachumbari on the side.',
+    ],
+    nutrition: {
+      proteinRich: false,
+      carbRich: true,
+      veggieRich: true,
+      fruitIncluded: false,
+      approxCalories: 300,
+    },
+    tags: ['Egg-Free', 'Coastal Snack', 'Crowd Favorite'],
+  },
+
+  // 38
+  {
+    id: 'meal_avocado_toast_groundnuts',
+    name: 'Avocado on Toast with Chili, Lime & Groundnuts',
+    swahiliName: 'Parachichi kwenye Mkate na Pilipili, Ndimu na Njugu',
+    category: 'snack',
+    prepTimeMinutes: 10,
+    estimatedCostKsh: 90,
+    costLevel: 'budget',
+    servings: 4,
+    description: 'Ripe mashed avocado on toasted bread, brightened with lime and chili and topped with crushed groundnuts for crunch.',
+    ingredients: [
+      { name: 'Avocado', quantity: 2, unit: 'pieces', estimatedCostKsh: 40 },
+      { name: 'Bread', quantity: 8, unit: 'slices', estimatedCostKsh: 30 },
+      { name: 'Lime & Chili Flakes', quantity: 1, unit: 'portion', estimatedCostKsh: 10 },
+      { name: 'Crushed Groundnuts', quantity: 30, unit: 'g', estimatedCostKsh: 10 },
+    ],
+    instructions: [
+      'Toast the bread slices until golden.',
+      'Mash avocado with a squeeze of lime, salt, and chili flakes.',
+      'Spread generously over the toast.',
+      'Top with crushed groundnuts and serve immediately.',
+    ],
+    nutrition: {
+      proteinRich: false,
+      carbRich: true,
+      veggieRich: true,
+      fruitIncluded: false,
+      approxCalories: 280,
+    },
+    tags: ['Egg-Free', 'Quick Snack', 'Heart Healthy'],
   }
 ];
 

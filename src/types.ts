@@ -93,6 +93,7 @@ export interface WeeklyMealPlan {
     snack?: Meal;
   }>;
   createdAt: string;
+  isStarred?: boolean;
 }
 
 export interface ShoppingItem {

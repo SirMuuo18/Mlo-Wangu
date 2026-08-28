@@ -549,7 +549,7 @@ export const contentDb = {
         snack: d.snack ? mapMealRecordToMeal(d.snack) : undefined,
       };
     }
-    return { id: p.id, userId: p.userId, householdId: p.householdId || '', weekStartDate: p.weekStartDate, days, createdAt: p.createdAt };
+    return { id: p.id, userId: p.userId, householdId: p.householdId || '', weekStartDate: p.weekStartDate, days, createdAt: p.createdAt, isStarred: p.isStarred };
   },
 
   async saveMealPlan(plan: WeeklyMealPlan): Promise<WeeklyMealPlan> {
@@ -586,6 +586,47 @@ export const contentDb = {
     });
     const saved = await contentDb.getMealPlan(plan.userId, plan.weekStartDate);
     return saved || plan;
+  },
+
+  // ── Meal-Plan History / Anti-Repeat / Starring ───────────────────────────
+  async getMealUsageHistory(userId: string, weeksBack: number, beforeWeekStartDate: string): Promise<{ mealId: string; count: number }[]> {
+    if (useJson()) return db.getMealUsageHistory(userId, weeksBack, beforeWeekStartDate);
+    return sb().getMealUsageHistory(userId, weeksBack, beforeWeekStartDate);
+  },
+
+  async getPreviousWeekMealIds(userId: string, beforeWeekStartDate: string): Promise<string[] | null> {
+    if (useJson()) return db.getPreviousWeekMealIds(userId, beforeWeekStartDate);
+    return sb().getPreviousWeekMealIds(userId, beforeWeekStartDate);
+  },
+
+  async setMealPlanStarred(userId: string, weekStartDate: string, starred: boolean): Promise<boolean> {
+    if (useJson()) return db.setMealPlanStarred(userId, weekStartDate, starred);
+    return sb().setMealPlanStarred(userId, weekStartDate, starred);
+  },
+
+  async getStarredMealIds(userId: string): Promise<Set<string>> {
+    if (useJson()) return db.getStarredMealIds(userId);
+    return sb().getStarredMealIds(userId);
+  },
+
+  async starMeal(userId: string, mealId: string): Promise<void> {
+    if (useJson()) return db.starMeal(userId, mealId);
+    return sb().starMeal(userId, mealId);
+  },
+
+  async unstarMeal(userId: string, mealId: string): Promise<void> {
+    if (useJson()) return db.unstarMeal(userId, mealId);
+    return sb().unstarMeal(userId, mealId);
+  },
+
+  async claimGenerationLock(userId: string, staleAfterMs: number): Promise<boolean> {
+    if (useJson()) return db.claimGenerationLock(userId, staleAfterMs);
+    return sb().claimGenerationLock(userId, staleAfterMs);
+  },
+
+  async releaseGenerationLock(userId: string): Promise<void> {
+    if (useJson()) return db.releaseGenerationLock(userId);
+    return sb().releaseGenerationLock(userId);
   },
 
   async getShoppingList(userId: string, weekStartDate: string = getMondayOfCurrentWeek()): Promise<ShoppingList | undefined> {

@@ -150,6 +150,13 @@ export const api = {
     request<{ mealPlan: WeeklyMealPlan; swappedMeal: Meal }>('/api/meal-plans/swap', {
       method: 'POST', body: JSON.stringify(data),
     }),
+  starMealPlanWeek: (weekStartDate: string) =>
+    request<{ success: boolean }>(`/api/meal-plans/${weekStartDate}/star`, { method: 'POST' }),
+  unstarMealPlanWeek: (weekStartDate: string) =>
+    request<{ success: boolean }>(`/api/meal-plans/${weekStartDate}/star`, { method: 'DELETE' }),
+  getStarredMeals: () => request<{ mealIds: string[] }>('/api/meals/starred'),
+  starMeal: (mealId: string) => request<{ success: boolean }>(`/api/meals/${mealId}/star`, { method: 'POST' }),
+  unstarMeal: (mealId: string) => request<{ success: boolean }>(`/api/meals/${mealId}/star`, { method: 'DELETE' }),
   getGenerationEntitlementStatus: () =>
     request<{ hasEntitlement: boolean; priceKsh: number }>('/api/meal-plans/generation/entitlement-status'),
   // Same opaque error message on any failure reason, reproduced as-is,

@@ -46,6 +46,9 @@ interface AppContextType {
   isProfileLoading: boolean;
   household: Household | null;
   mealPlan: WeeklyMealPlan | null;
+  starredMealIds: Set<string>;
+  toggleStarMeal: (mealId: string) => Promise<void>;
+  toggleStarCurrentWeek: () => Promise<void>;
   shoppingList: ShoppingList | null;
   waterLog: WaterLog | null;
   waterConfig: WaterTargetConfig | null;
@@ -116,6 +119,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isProfileLoading, setIsProfileLoading] = useState(true);
   const [household, setHousehold] = useState<Household | null>(null);
   const [mealPlan, setMealPlan] = useState<WeeklyMealPlan | null>(null);
+  const [starredMealIds, setStarredMealIds] = useState<Set<string>>(new Set());
   const [shoppingList, setShoppingList] = useState<ShoppingList | null>(null);
   const [waterLog, setWaterLog] = useState<WaterLog | null>(null);
   const [waterConfig, setWaterConfig] = useState<WaterTargetConfig | null>(null);
@@ -154,7 +158,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Load Public / Shareable Application Data
   const loadPublicData = useCallback(async () => {
     try {
-      const [uRes, hRes, mpRes, slRes, wRes, fRes, mRes, nRes] = await Promise.all([
+      const [uRes, hRes, mpRes, slRes, wRes, fRes, mRes, nRes, starredRes] = await Promise.all([
         api.getMe().catch(() => null),
         api.getHousehold().catch(() => null),
         api.getCurrentMealPlan().catch(() => null),
@@ -163,11 +167,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         api.getFoodItems().catch(() => null),
         api.getMeals().catch(() => null),
         api.getNotifications().catch(() => null),
+        api.getStarredMeals().catch(() => null),
       ]);
 
       if (uRes?.user) setUser(uRes.user);
       if (hRes?.household) setHousehold(hRes.household);
       if (mpRes?.mealPlan) setMealPlan(mpRes.mealPlan);
+      if (starredRes?.mealIds) setStarredMealIds(new Set(starredRes.mealIds));
       if (slRes?.shoppingList) setShoppingList(slRes.shoppingList);
       if (wRes) {
         setWaterLog(wRes.waterLog);
@@ -394,6 +400,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // Meal starring (Meal-Variety Engine v1) — "I liked this meal/week."
+  // Starring a meal softens its cross-week repetition penalty in future
+  // generations; starring the current week protects it from being
+  // overwritten by a future regenerate/swap (the server rejects those with
+  // a 409 for a starred week — surfaced here as a thrown error the caller
+  // can catch and show).
+  const toggleStarMeal = async (mealId: string) => {
+    const alreadyStarred = starredMealIds.has(mealId);
+    if (alreadyStarred) await api.unstarMeal(mealId); else await api.starMeal(mealId);
+    setStarredMealIds((prev) => {
+      const next = new Set(prev);
+      if (alreadyStarred) next.delete(mealId); else next.add(mealId);
+      return next;
+    });
+  };
+
+  const toggleStarCurrentWeek = async () => {
+    if (!mealPlan) return;
+    if (mealPlan.isStarred) {
+      await api.unstarMealPlanWeek(mealPlan.weekStartDate);
+      setMealPlan({ ...mealPlan, isStarred: false });
+    } else {
+      await api.starMealPlanWeek(mealPlan.weekStartDate);
+      setMealPlan({ ...mealPlan, isStarred: true });
+    }
+  };
+
   // Regenerate Meal Plan. Does not check entitlement itself — the server's
   // POST /api/meal-plans/generate is the sole authority and returns 402
   // PAYMENT_REQUIRED if the caller has none; callers that want the
@@ -481,6 +514,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isProfileLoading,
         household,
         mealPlan,
+        starredMealIds,
+        toggleStarMeal,
+        toggleStarCurrentWeek,
         shoppingList,
         waterLog,
         waterConfig,

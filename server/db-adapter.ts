@@ -210,6 +210,7 @@ export interface MealPlanRecord {
   householdId: string | null;
   weekStartDate: string;  // 'YYYY-MM-DD'
   createdAt: string;
+  isStarred: boolean;
   days: Record<DayOfWeek, Partial<Record<MealSlot, MealRecord | null>>>;
 }
 
@@ -327,6 +328,28 @@ export interface IDatabaseAdapter {
   // ── Meal Plans ────────────────────────────────────────────────────────────
   getMealPlan(userId: string, weekStartDate?: string): Promise<MealPlanRecord | null>;
   saveMealPlan(plan: MealPlanSaveInput): Promise<MealPlanRecord>;
+
+  // ── Meal-Plan History / Anti-Repeat / Starring ───────────────────────────
+  // Per-meal-id usage counts across the user's saved weeks in the last
+  // `weeksBack` calendar weeks strictly before `beforeWeekStartDate` — a
+  // bounded, indexed window, never a full lifetime history scan.
+  getMealUsageHistory(userId: string, weeksBack: number, beforeWeekStartDate: string): Promise<{ mealId: string; count: number }[]>;
+  // The single most recently-saved week's meal ids (any slot), for the
+  // week-similarity novelty check — null if no prior week exists.
+  getPreviousWeekMealIds(userId: string, beforeWeekStartDate: string): Promise<string[] | null>;
+  // Refuses to un-flag a week that isn't actually saved; returns false if
+  // no matching plan exists, true on success. Starring an already-starred
+  // week (or unstarring an already-unstarred one) is a safe no-op success.
+  setMealPlanStarred(userId: string, weekStartDate: string, starred: boolean): Promise<boolean>;
+  getStarredMealIds(userId: string): Promise<Set<string>>;
+  starMeal(userId: string, mealId: string): Promise<void>;
+  unstarMeal(userId: string, mealId: string): Promise<void>;
+  // Short-lived per-user generation mutex (CAS-style: claim fails if
+  // another live claim exists). A claim older than staleAfterMs is treated
+  // as abandoned (e.g. a crashed request that never released) and may be
+  // reclaimed rather than deadlocking generation forever.
+  claimGenerationLock(userId: string, staleAfterMs: number): Promise<boolean>;
+  releaseGenerationLock(userId: string): Promise<void>;
 
   // ── Shopping Lists ────────────────────────────────────────────────────────
   getShoppingList(userId: string, weekStartDate?: string): Promise<ShoppingListRecord | null>;

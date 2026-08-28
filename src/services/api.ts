@@ -118,6 +118,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  starMealPlanWeek: (weekStartDate: string) =>
+    request<{ success: boolean }>(`/api/meal-plans/${weekStartDate}/star`, { method: 'POST' }),
+  unstarMealPlanWeek: (weekStartDate: string) =>
+    request<{ success: boolean }>(`/api/meal-plans/${weekStartDate}/star`, { method: 'DELETE' }),
+  getStarredMeals: () => request<{ mealIds: string[] }>('/api/meals/starred'),
+  starMeal: (mealId: string) => request<{ success: boolean }>(`/api/meals/${mealId}/star`, { method: 'POST' }),
+  unstarMeal: (mealId: string) => request<{ success: boolean }>(`/api/meals/${mealId}/star`, { method: 'DELETE' }),
 
   // "Generate New Plan" gate — KSh 50 payment or access code buys one new
   // generation. Viewing the current plan above is always free. The server

@@ -14,6 +14,7 @@ import {
   Leaf,
   Flame,
   Plus,
+  Star,
 } from 'lucide-react';
 import { DayOfWeek, MealCategory, FoodCategory, Meal, FoodItem } from '../types';
 import { getFoodImageUrl } from '../utils/foodImages';
@@ -21,6 +22,9 @@ import { getFoodImageUrl } from '../utils/foodImages';
 export const MealsView: React.FC = () => {
   const {
     mealPlan,
+    starredMealIds,
+    toggleStarMeal,
+    toggleStarCurrentWeek,
     allMeals,
     foodItems,
     household,
@@ -110,6 +114,20 @@ export const MealsView: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {mealPlan && (
+              <button
+                onClick={() => toggleStarCurrentWeek().catch((err) => console.error('Error toggling week star:', err))}
+                title={mealPlan.isStarred ? 'Unstar this week (allows it to be regenerated again)' : 'Star this week to protect it from being overwritten'}
+                className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                  mealPlan.isStarred
+                    ? 'bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100'
+                    : 'bg-white border-[#E8E5DD] text-[#66736A] hover:bg-[#FAF8F2]'
+                }`}
+              >
+                <Star className={`w-3.5 h-3.5 ${mealPlan.isStarred ? 'fill-amber-500 text-amber-500' : ''}`} />
+                <span>{mealPlan.isStarred ? 'Starred' : 'Star this week'}</span>
+              </button>
+            )}
             <button
               onClick={() => handleGeneratePlan()}
               disabled={isGenerating}
@@ -190,6 +208,8 @@ export const MealsView: React.FC = () => {
                     category={cat}
                     day={selectedDay}
                     meal={meal}
+                    isStarred={!!meal && starredMealIds.has(meal.id)}
+                    onToggleStar={() => meal && toggleStarMeal(meal.id).catch((err) => console.error('Error toggling meal star:', err))}
                     onViewRecipe={() => meal && setSelectedMealForRecipe(meal)}
                     onSwap={() =>
                       meal && setSelectedMealForSwap({ day: selectedDay, mealType: cat, meal })
@@ -491,9 +511,11 @@ const MealPlanSlotCard: React.FC<{
   category: MealCategory;
   day: DayOfWeek;
   meal?: Meal;
+  isStarred?: boolean;
+  onToggleStar?: () => void;
   onViewRecipe: () => void;
   onSwap: () => void;
-}> = ({ category, day, meal, onViewRecipe, onSwap }) => {
+}> = ({ category, day, meal, isStarred, onToggleStar, onViewRecipe, onSwap }) => {
   if (!meal) {
     return (
       <div className="bg-white p-5 rounded-3xl border border-dashed border-[#E8E5DD] flex flex-col justify-center items-center text-center min-h-[220px]">
@@ -531,6 +553,16 @@ const MealPlanSlotCard: React.FC<{
             {category}
           </span>
         </div>
+
+        {onToggleStar && (
+          <button
+            onClick={onToggleStar}
+            title={isStarred ? 'Unstar this meal' : 'Star this meal — it will still show up sometimes, just not as often'}
+            className="absolute top-2 right-2 p-1 rounded-full bg-black/60 backdrop-blur-xs border border-white/20 hover:bg-black/80 cursor-pointer"
+          >
+            <Star className={`w-3.5 h-3.5 ${isStarred ? 'fill-amber-400 text-amber-400' : 'text-white'}`} />
+          </button>
+        )}
 
         <div className="absolute bottom-2 left-2 right-2 text-white">
           <h4 className="text-xs font-extrabold line-clamp-1 leading-snug">{meal.name}</h4>

@@ -12,7 +12,7 @@ import { LoadingState } from '../../../../components/LoadingState';
 import { ErrorState } from '../../../../components/ErrorState';
 import { EmptyState } from '../../../../components/EmptyState';
 import { useAuth } from '../../../../context/AuthContext';
-import { useMealPlan, useEntitlementStatus, useGenerateMealPlan, ApiError } from '../../../../hooks/useMealPlan';
+import { useMealPlan, useEntitlementStatus, useGenerateMealPlan, useToggleWeekStar, useStarredMeals, useToggleMealStar, ApiError } from '../../../../hooks/useMealPlan';
 import { colors, radius, spacing } from '../../../../constants/theme';
 import type { DayOfWeek, Meal, MealCategory } from '../../../../types/domain';
 
@@ -24,6 +24,9 @@ export default function MealsScreen() {
   const mealPlanQuery = useMealPlan();
   const entitlementQuery = useEntitlementStatus();
   const generateMealPlan = useGenerateMealPlan();
+  const toggleWeekStar = useToggleWeekStar();
+  const starredMealsQuery = useStarredMeals();
+  const toggleMealStar = useToggleMealStar();
   const [selectedDay, setSelectedDay] = useState<DayOfWeek>('Monday');
   const [generateError, setGenerateError] = useState<string | null>(null);
 
@@ -51,6 +54,7 @@ export default function MealsScreen() {
   if (mealPlanQuery.isError) return <ErrorState message="Could not load your meal plan." onRetry={mealPlanQuery.refetch} />;
 
   const dayPlan = mealPlanQuery.data?.days[selectedDay];
+  const starredMealIds = starredMealsQuery.data ?? new Set<string>();
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -63,6 +67,15 @@ export default function MealsScreen() {
           style={styles.generateButton}
         />
       </View>
+      {mealPlanQuery.data ? (
+        <Button
+          label={mealPlanQuery.data.isStarred ? '★ Week Starred (tap to unstar)' : '☆ Star this week'}
+          variant="secondary"
+          onPress={() => toggleWeekStar.mutate({ weekStartDate: mealPlanQuery.data!.weekStartDate, starred: !!mealPlanQuery.data!.isStarred })}
+          loading={toggleWeekStar.isPending}
+          style={styles.starWeekButton}
+        />
+      ) : null}
       {generateError ? (
         <AppText variant="caption" color={colors.danger} style={styles.generateError}>{generateError}</AppText>
       ) : null}
@@ -87,7 +100,15 @@ export default function MealsScreen() {
       ) : (
         <View style={styles.slotList}>
           {SLOTS.map((slot) => (
-            <MealSlotCard key={slot} label={slot} meal={dayPlan?.[slot]} day={selectedDay} slot={slot} />
+            <MealSlotCard
+              key={slot}
+              label={slot}
+              meal={dayPlan?.[slot]}
+              day={selectedDay}
+              slot={slot}
+              isStarred={!!dayPlan?.[slot] && starredMealIds.has(dayPlan[slot]!.id)}
+              onToggleStar={() => dayPlan?.[slot] && toggleMealStar.mutate({ mealId: dayPlan[slot]!.id, starred: starredMealIds.has(dayPlan[slot]!.id) })}
+            />
           ))}
         </View>
       )}
@@ -95,9 +116,14 @@ export default function MealsScreen() {
   );
 }
 
-const MealSlotCard: React.FC<{ label: string; meal?: Meal; day: DayOfWeek; slot: string }> = ({ label, meal, day, slot }) => (
+const MealSlotCard: React.FC<{ label: string; meal?: Meal; day: DayOfWeek; slot: string; isStarred?: boolean; onToggleStar?: () => void }> = ({ label, meal, day, slot, isStarred, onToggleStar }) => (
   <View style={styles.slotCard}>
-    <AppText variant="label" color={colors.forest}>{label}</AppText>
+    <View style={styles.slotHeaderRow}>
+      <AppText variant="label" color={colors.forest}>{label}</AppText>
+      {meal && onToggleStar ? (
+        <Button label={isStarred ? '★' : '☆'} variant="secondary" onPress={onToggleStar} style={styles.starMealButton} />
+      ) : null}
+    </View>
     {meal ? (
       <>
         <AppText variant="bodyBold" style={styles.slotMealName}>{meal.name}</AppText>
@@ -123,12 +149,15 @@ const styles = StyleSheet.create({
   content: { padding: spacing.lg, paddingBottom: spacing.xxl },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   generateButton: { minHeight: 40, paddingHorizontal: spacing.md },
+  starWeekButton: { marginTop: spacing.sm, alignSelf: 'flex-start', minHeight: 36, paddingHorizontal: spacing.md },
   generateError: { marginTop: spacing.sm },
   dayPills: { marginTop: spacing.md, marginBottom: spacing.lg, flexGrow: 0 },
   dayPillsContent: { gap: spacing.xs },
   dayPill: { minHeight: 36, paddingHorizontal: spacing.md },
   slotList: { gap: spacing.md },
   slotCard: { backgroundColor: colors.surface, borderRadius: radius.xl, borderWidth: 1, borderColor: colors.line, padding: spacing.lg },
+  slotHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  starMealButton: { minHeight: 32, minWidth: 44, paddingHorizontal: spacing.sm },
   slotMealName: { marginTop: spacing.xs },
   noMeal: { marginTop: spacing.xs },
   slotActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },
