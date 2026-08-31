@@ -4,7 +4,7 @@
 // as toggling an item — the only difference is source:'manual', which is
 // what makes secureDb.saveMealPlan preserve it across the next regeneration
 // instead of wiping it like every source:'generated' item.
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, Pressable, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppText } from '../../../components/AppText';
@@ -15,7 +15,8 @@ import { TextField } from '../../../components/TextField';
 import { Button } from '../../../components/Button';
 import { useShoppingList, useUpdateShoppingList } from '../../../hooks/useShopping';
 import { colors, radius, spacing } from '../../../constants/theme';
-import type { ShoppingItem } from '../../../types/domain';
+import { api } from '../../../lib/api';
+import type { ShoppingItem, ShoppingCategory } from '../../../types/domain';
 
 const CATEGORY_LABELS: Record<string, string> = {
   carbohydrates: 'Cereals, Flour & Tubers',
@@ -24,8 +25,20 @@ const CATEGORY_LABELS: Record<string, string> = {
   fruits: 'Fruits',
   dairy: 'Dairy & Milks',
   spices_pantry: 'Pantry & Spices',
+  household: 'Household',
+  cleaning: 'Cleaning',
+  personal_care: 'Personal Care',
+  utilities: 'Utilities',
   other: 'Other',
 };
+
+const NON_FOOD_OPTIONS: { key: ShoppingCategory; label: string }[] = [
+  { key: 'household', label: 'Household' },
+  { key: 'cleaning', label: 'Cleaning' },
+  { key: 'personal_care', label: 'Personal Care' },
+  { key: 'utilities', label: 'Utilities' },
+  { key: 'other', label: 'Other' },
+];
 
 const FREQUENCY_LABELS: Record<'weekly' | 'monthly', string> = {
   weekly: 'Buy This Week',
@@ -46,6 +59,20 @@ export default function ShoppingScreen() {
   const [newQty, setNewQty] = useState('1');
   const [newUnit, setNewUnit] = useState('pc');
   const [newPrice, setNewPrice] = useState('0');
+  const [newCategory, setNewCategory] = useState<'' | ShoppingCategory>('');
+  const [duplicateWarning, setDuplicateWarning] = useState<{ name: string; quantity: number; unit: string } | null>(null);
+  const duplicateTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  useEffect(() => {
+    if (duplicateTimer.current) clearTimeout(duplicateTimer.current);
+    if (!newName.trim()) { setDuplicateWarning(null); return; }
+    duplicateTimer.current = setTimeout(() => {
+      api.checkShoppingDuplicate(newName.trim())
+        .then((res) => setDuplicateWarning(res.duplicate && res.existingItem ? res.existingItem : null))
+        .catch(() => {});
+    }, 400);
+    return () => { if (duplicateTimer.current) clearTimeout(duplicateTimer.current); };
+  }, [newName]);
 
   const items = shoppingList?.items ?? [];
   const totalCost = items.reduce((sum, i) => sum + (i.estimatedPriceKsh || 0), 0);
@@ -83,7 +110,9 @@ export default function ShoppingScreen() {
     if (!newName.trim()) return;
     const base: ShoppingItem[] = shoppingList?.items ?? [];
     const newItem: ShoppingItem = {
-      id: `manual_${Date.now()}`, category: 'other', name: newName.trim(),
+      // Empty category (not 'other') when the user leaves it on "Food" —
+      // lets the server infer the specific food subcategory from the name.
+      id: `manual_${Date.now()}`, category: (newCategory || '') as ShoppingCategory, name: newName.trim(),
       quantity: Number(newQty) || 1, unit: newUnit.trim() || 'pc',
       estimatedPriceKsh: Number(newPrice) || 0, isPurchased: false,
       frequency: 'weekly', source: 'manual',
@@ -99,6 +128,8 @@ export default function ShoppingScreen() {
     setNewQty('1');
     setNewUnit('pc');
     setNewPrice('0');
+    setNewCategory('');
+    setDuplicateWarning(null);
     setShowAddForm(false);
   };
 
@@ -134,7 +165,29 @@ export default function ShoppingScreen() {
           </View>
           {showAddForm && (
             <View style={styles.addForm}>
-              <TextField label="Item name" value={newName} onChangeText={setNewName} placeholder="e.g. Dish soap" />
+              <TextField label="Item name" value={newName} onChangeText={setNewName} placeholder="e.g. Dish soap, Toilet paper, Tomatoes" />
+              {duplicateWarning && (
+                <AppText variant="caption" color="#B45309">
+                  {duplicateWarning.name} — Already added · {duplicateWarning.quantity} {duplicateWarning.unit}
+                </AppText>
+              )}
+              <View style={styles.categoryChips}>
+                <Pressable
+                  style={[styles.categoryChip, !newCategory && styles.categoryChipActive]}
+                  onPress={() => setNewCategory('')}
+                >
+                  <AppText variant="caption" color={!newCategory ? colors.cream : colors.moss}>Food</AppText>
+                </Pressable>
+                {NON_FOOD_OPTIONS.map((c) => (
+                  <Pressable
+                    key={c.key}
+                    style={[styles.categoryChip, newCategory === c.key && styles.categoryChipActive]}
+                    onPress={() => setNewCategory(c.key)}
+                  >
+                    <AppText variant="caption" color={newCategory === c.key ? colors.cream : colors.moss}>{c.label}</AppText>
+                  </Pressable>
+                ))}
+              </View>
               <View style={styles.addFormRow}>
                 <View style={styles.addFormField}>
                   <TextField label="Qty" value={newQty} onChangeText={setNewQty} keyboardType="numeric" />
@@ -212,6 +265,9 @@ const styles = StyleSheet.create({
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   addButton: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: spacing.xs, paddingHorizontal: spacing.sm, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
   addForm: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: radius.lg, padding: spacing.md, marginTop: spacing.md, gap: spacing.xs },
+  categoryChips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs },
+  categoryChip: { paddingVertical: 6, paddingHorizontal: spacing.sm, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.cream },
+  categoryChipActive: { backgroundColor: colors.forest, borderColor: colors.forest },
   addFormRow: { flexDirection: 'row', gap: spacing.sm },
   addFormField: { flex: 1 },
   removeButton: { padding: spacing.xs, marginLeft: spacing.xs },

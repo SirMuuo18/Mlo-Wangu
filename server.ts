@@ -22,6 +22,7 @@ import { sendPushToUser } from './server/push.js';
 import { logServerError } from './server/errorLog.js';
 import { KENYAN_MEALS, KENYAN_FOOD_ITEMS } from './src/data/kenyanFoodData.js';
 import { ExpenseCategory, Meal } from './src/types.js';
+import { canonicalizeShoppingItemName } from './server/shoppingCanonicalization.js';
 import { requireAuth, optionalAuth, setAuthCookies, clearAuthCookies } from './server/auth-middleware.js';
 
 dotenv.config();
@@ -1608,14 +1609,44 @@ app.get('/api/shopping/current', requireAuth, async (req: Request, res: Response
 app.put('/api/shopping/current', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   const updatedList = req.body.shoppingList;
-  if (!updatedList) {
+  if (!updatedList || !Array.isArray(updatedList.items)) {
     return res.status(400).json({ error: 'Missing shoppingList payload' });
+  }
+  for (const item of updatedList.items) {
+    if (typeof item?.name !== 'string' || !item.name.trim()) {
+      return res.status(400).json({ error: 'Every shopping list item needs a non-empty name' });
+    }
+    if (typeof item.quantity !== 'number' || !Number.isFinite(item.quantity) || item.quantity < 0) {
+      return res.status(400).json({ error: `Invalid quantity for item "${item.name}"` });
+    }
   }
   // userId always comes from the verified session — a client-supplied
   // userId in the body can never redirect this write to another user's list.
   updatedList.userId = userId;
+  // contentDb.saveShoppingList runs every write through mergeShoppingItems,
+  // so duplicates/naming-variants of the same ingredient collapse here
+  // regardless of how they got into this payload (manual add, a retried
+  // request, another device/session).
   const saved = await contentDb.saveShoppingList(updatedList);
   res.json({ shoppingList: saved });
+});
+
+// Lets the "Add item" UI tell the user an item already exists before they
+// create a visible duplicate (Phase — shopping list dedup, item 19).
+// Read-only: does not modify the list, just canonicalizes `name` and checks
+// it against the caller's own current list.
+app.get('/api/shopping/check-duplicate', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  const name = typeof req.query.name === 'string' ? req.query.name : '';
+  if (!name.trim()) return res.json({ duplicate: false });
+  const canon = canonicalizeShoppingItemName(name);
+  const list = await contentDb.getShoppingList(userId);
+  const existing = (list?.items ?? []).find((i) => i.canonicalKey === canon.canonicalKey);
+  res.json({
+    duplicate: !!existing,
+    canonicalName: canon.canonicalName,
+    existingItem: existing ? { name: existing.name, quantity: existing.quantity, unit: existing.unit } : undefined,
+  });
 });
 
 // 7. Water & Hydration Tracker

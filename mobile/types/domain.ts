@@ -15,6 +15,7 @@ export type {
   AgeGroup,
   ShoppingList,
   ShoppingItem,
+  ShoppingCategory,
   WaterLog,
   WaterTargetConfig,
   UserBudget,

@@ -1,5 +1,9 @@
 export type MealCategory = 'breakfast' | 'lunch' | 'dinner' | 'snack';
 export type FoodCategory = 'carbohydrates' | 'proteins' | 'vegetables' | 'fruits' | 'dairy' | 'spices_pantry';
+// Shopping-list items can be non-food (item 9-13 of the shopping-list
+// dedup/non-food spec) — a distinct, wider category type from FoodCategory,
+// which stays food-only since it's also used for FoodItem/Meal ingredients.
+export type ShoppingCategory = FoodCategory | 'household' | 'cleaning' | 'personal_care' | 'utilities' | 'other';
 export type AgeGroup = 'adult' | 'teen' | 'child' | 'infant';
 export type ExpenseCategory = 'Food' | 'Rent' | 'Transport' | 'Bills' | 'Shopping' | 'Entertainment' | 'Debt' | 'Savings' | 'Health' | 'Other';
 
@@ -98,7 +102,7 @@ export interface WeeklyMealPlan {
 
 export interface ShoppingItem {
   id: string;
-  category: FoodCategory | 'other';
+  category: ShoppingCategory;
   name: string;
   quantity: number;
   unit: string;
@@ -117,6 +121,17 @@ export interface ShoppingItem {
   // otherwise replaces the whole list. Optional for the same reason as
   // frequency above — pre-existing callers default to 'generated' server-side.
   source?: 'generated' | 'manual';
+  // Dedup/canonicalization metadata (server/shoppingCanonicalization.ts).
+  // Optional — older items and manually-typed additions may not carry it
+  // until the next merge pass.
+  canonicalKey?: string;
+  variant?: string;
+  isCompound?: boolean;
+  // Set only when this item represents a quantity the server could not
+  // safely merge with another matching item because the units were
+  // incompatible (e.g. "8 pieces" vs "1 kg") — never a silently-invented
+  // conversion, just a note surfaced to the user.
+  quantityNote?: string;
 }
 
 export interface ShoppingList {

@@ -12,6 +12,7 @@ import {
   NotificationItem,
   OverspendingAnalysis,
   UserBudget,
+  ShoppingItem,
 } from '../types';
 import { api } from '../services/api';
 import confetti from 'canvas-confetti';
@@ -94,7 +95,7 @@ interface AppContextType {
   // Public Actions
   logWater: (amountMl: number) => Promise<void>;
   toggleShoppingItem: (itemId: string) => Promise<void>;
-  addManualShoppingItem: (name: string, quantity: number, unit: string, estimatedPriceKsh: number) => Promise<void>;
+  addManualShoppingItem: (name: string, quantity: number, unit: string, estimatedPriceKsh: number, category?: ShoppingItem['category']) => Promise<void>;
   removeManualShoppingItem: (itemId: string) => Promise<void>;
   swapMeal: (day: string, mealType: string, currentMealId: string, reason?: 'cheaper' | 'faster' | 'random') => Promise<void>;
   regenerateMealPlan: (budgetAware?: boolean) => Promise<boolean>;
@@ -365,18 +366,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // site that explicitly sets source:'manual', which is what makes it
   // survive the next meal-plan regeneration (secureDb.saveMealPlan
   // preserves manual rows, replaces generated ones).
-  const addManualShoppingItem = async (name: string, quantity: number, unit: string, estimatedPriceKsh: number) => {
+  const addManualShoppingItem = async (
+    name: string, quantity: number, unit: string, estimatedPriceKsh: number, category?: ShoppingItem['category']
+  ) => {
     const base: ShoppingList = shoppingList ?? {
       id: `sl_${Date.now()}`, userId: user?.id || '', weekStartDate: new Date().toISOString().slice(0, 10),
       items: [], updatedAt: new Date().toISOString(),
     };
     const newItem = {
-      id: `manual_${Date.now()}`, category: 'other' as const, name, quantity, unit,
+      // Empty string (not 'other') when category is omitted — the user
+      // picked "Food" in the add form, so an empty/falsy category here lets
+      // the server infer the specific food subcategory from the name
+      // instead of dumping it under "Other". See mergeShoppingItems'
+      // category fallback in server/shoppingCanonicalization.ts.
+      id: `manual_${Date.now()}`, category: (category || '') as ShoppingItem['category'], name, quantity, unit,
       estimatedPriceKsh, isPurchased: false, frequency: 'weekly' as const, source: 'manual' as const,
     };
     const updatedList = { ...base, items: [...base.items, newItem] };
     setShoppingList(updatedList);
     await api.updateShoppingList(updatedList).catch(() => {});
+    const fresh = await api.getShoppingList().catch(() => null);
+    if (fresh?.shoppingList) setShoppingList(fresh.shoppingList);
   };
 
   const removeManualShoppingItem = async (itemId: string) => {

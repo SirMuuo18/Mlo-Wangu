@@ -28,6 +28,11 @@ const stamp = Date.now();
 const emailA = `mlo-p3b-shop-a-${stamp}@example.com`;
 const emailB = `mlo-p3b-shop-b-${stamp}@example.com`;
 const password = 'Phase3BShopManual123!';
+// Deliberately NOT a recognized alias (server/shoppingCanonicalization.ts) so
+// this test's exact-name assertions hold — "Dish Soap" itself would
+// correctly canonicalize to "Dishwashing Liquid", which is intentional dedup
+// behavior covered separately in security-tests-shopping-dedup.mjs.
+const manualItemName = `Zzz Novelty Cleaning Item ${stamp}`;
 
 async function createConfirmedUser(email) {
   const { data, error } = await admin.auth.admin.createUser({ email, password, email_confirm: true });
@@ -78,22 +83,22 @@ try {
   {
     const current = await req('/api/shopping/current', { headers: authA });
     const list = current.body.shoppingList ?? { id: `sl_test_${stamp}`, userId: userAId, weekStartDate: new Date().toISOString().slice(0, 10), items: [], updatedAt: new Date().toISOString() };
-    const manualItem = { id: `manual_${stamp}`, category: 'other', name: 'Dish Soap', quantity: 1, unit: 'bottle', estimatedPriceKsh: 150, isPurchased: false, frequency: 'monthly', source: 'manual' };
+    const manualItem = { id: `manual_${stamp}`, category: 'other', name: manualItemName, quantity: 1, unit: 'bottle', estimatedPriceKsh: 150, isPurchased: false, frequency: 'monthly', source: 'manual' };
     const put = await req('/api/shopping/current', { method: 'PUT', headers: authA, body: JSON.stringify({ shoppingList: { ...list, items: [...list.items, manualItem] } }) });
     assert('Whole-list PUT with a manual item succeeds → 200', put.status === 200, JSON.stringify(put.body));
 
-    const { data: row } = await admin.from('shopping_list_items').select('source, name').eq('name', 'Dish Soap').eq('shopping_list_id', put.body.shoppingList.id).maybeSingle();
+    const { data: row } = await admin.from('shopping_list_items').select('source, name').eq('name', manualItemName).eq('shopping_list_id', put.body.shoppingList.id).maybeSingle();
     assert("Item is stored with source='manual'", row?.source === 'manual', JSON.stringify(row));
 
     const reread = await req('/api/shopping/current', { headers: authA });
-    const found = reread.body.shoppingList?.items?.find((i) => i.name === 'Dish Soap');
+    const found = reread.body.shoppingList?.items?.find((i) => i.name === manualItemName);
     assert('Manual item round-trips with source=manual on read', found?.source === 'manual', JSON.stringify(found));
   }
 
   console.log('── Ownership unaffected ──');
   {
     const listB = await req('/api/shopping/current', { headers: authB });
-    const hasA = (listB.body.shoppingList?.items || []).some((i) => i.name === 'Dish Soap');
+    const hasA = (listB.body.shoppingList?.items || []).some((i) => i.name === manualItemName);
     assert("User B's shopping list never contains User A's manual item", !hasA, JSON.stringify(listB.body.shoppingList));
   }
 
@@ -115,7 +120,7 @@ try {
 
     const afterList = await req('/api/shopping/current', { headers: authA });
     const afterItems = afterList.body.shoppingList?.items || [];
-    const stillThere = afterItems.some((i) => i.name === 'Dish Soap' && i.source === 'manual');
+    const stillThere = afterItems.some((i) => i.name === manualItemName && i.source === 'manual');
     assert('The manual item survives the regeneration that replaced the generated items', stillThere, JSON.stringify(afterItems.map((i) => i.name)));
     assert('Generated items are still present too (the merge is additive, not a wipe of everything else)', afterItems.some((i) => i.source === 'generated'), JSON.stringify(afterItems.map((i) => i.source)));
   }

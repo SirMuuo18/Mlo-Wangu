@@ -1,8 +1,17 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
-import { ShoppingBag, CheckCircle2, Circle, Share2, Copy, Check, Search, Plus, X, PenLine } from 'lucide-react';
-import { FoodCategory } from '../types';
+import { ShoppingBag, CheckCircle2, Circle, Share2, Copy, Check, Search, Plus, X, PenLine, AlertCircle } from 'lucide-react';
+import { FoodCategory, ShoppingCategory } from '../types';
 import { getFoodImageUrl } from '../utils/foodImages';
+import { api } from '../services/api';
+
+const NON_FOOD_CATEGORIES: { key: ShoppingCategory; label: string }[] = [
+  { key: 'household', label: 'Household' },
+  { key: 'cleaning', label: 'Cleaning' },
+  { key: 'personal_care', label: 'Personal Care' },
+  { key: 'utilities', label: 'Utilities' },
+  { key: 'other', label: 'Other' },
+];
 
 export const ShoppingView: React.FC = () => {
   const { shoppingList, household, toggleShoppingItem, addManualShoppingItem, removeManualShoppingItem } = useApp();
@@ -16,15 +25,36 @@ export const ShoppingView: React.FC = () => {
   const [newItemQty, setNewItemQty] = useState('1');
   const [newItemUnit, setNewItemUnit] = useState('pc');
   const [newItemPrice, setNewItemPrice] = useState('0');
+  const [newItemCategory, setNewItemCategory] = useState<'' | ShoppingCategory>('');
+  const [duplicateWarning, setDuplicateWarning] = useState<{ name: string; quantity: number; unit: string } | null>(null);
+  const duplicateCheckTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // Debounced "already added" check (item 19) — tells the user before they
+  // create a visible duplicate, rather than silently letting one through.
+  useEffect(() => {
+    if (duplicateCheckTimer.current) clearTimeout(duplicateCheckTimer.current);
+    if (!newItemName.trim()) { setDuplicateWarning(null); return; }
+    duplicateCheckTimer.current = setTimeout(() => {
+      api.checkShoppingDuplicate(newItemName.trim())
+        .then((res) => setDuplicateWarning(res.duplicate && res.existingItem ? res.existingItem : null))
+        .catch(() => {});
+    }, 400);
+    return () => { if (duplicateCheckTimer.current) clearTimeout(duplicateCheckTimer.current); };
+  }, [newItemName]);
 
   const handleAddItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newItemName.trim()) return;
-    await addManualShoppingItem(newItemName.trim(), Number(newItemQty) || 1, newItemUnit.trim() || 'pc', Number(newItemPrice) || 0);
+    await addManualShoppingItem(
+      newItemName.trim(), Number(newItemQty) || 1, newItemUnit.trim() || 'pc', Number(newItemPrice) || 0,
+      newItemCategory || undefined
+    );
     setNewItemName('');
     setNewItemQty('1');
     setNewItemUnit('pc');
     setNewItemPrice('0');
+    setNewItemCategory('');
+    setDuplicateWarning(null);
     setShowAddForm(false);
   };
 
@@ -43,6 +73,7 @@ export const ShoppingView: React.FC = () => {
     { key: 'dairy', label: 'Dairy & Milks' },
     { key: 'spices_pantry', label: 'Pantry, Cooking Oil & Spices' },
   ];
+  const allCategoriesOrder: { key: ShoppingCategory; label: string }[] = [...categoriesOrder, ...NON_FOOD_CATEGORIES];
 
   const getItemName = (item: any) => item?.name || item?.foodItemName || 'Item';
   const getItemSwahili = (item: any) => item?.swahiliName || '';
@@ -67,7 +98,7 @@ export const ShoppingView: React.FC = () => {
       '',
     ];
 
-    categoriesOrder.forEach(({ key, label }) => {
+    allCategoriesOrder.forEach(({ key, label }) => {
       const catItems = items.filter((i) => i.category === key);
       if (catItems.length > 0) {
         lines.push(`*${label}*`);
@@ -198,7 +229,7 @@ export const ShoppingView: React.FC = () => {
             >
               All Categories
             </button>
-            {categoriesOrder.map((c) => (
+            {allCategoriesOrder.map((c) => (
               <button
                 key={c.key}
                 onClick={() => setSelectedCategory(c.key)}
@@ -212,30 +243,48 @@ export const ShoppingView: React.FC = () => {
           </div>
         </div>
         {showAddForm && (
-          <form onSubmit={handleAddItem} className="mt-4 pt-4 border-t border-[#F1EFE8] flex flex-wrap items-end gap-2">
-            <input
-              type="text" placeholder="Item name (e.g. Dish soap)" value={newItemName}
-              onChange={(e) => setNewItemName(e.target.value)} required
-              className="flex-1 min-w-[160px] px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
-            />
-            <input
-              type="number" min="0.1" step="0.1" placeholder="Qty" value={newItemQty}
-              onChange={(e) => setNewItemQty(e.target.value)}
-              className="w-20 px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
-            />
-            <input
-              type="text" placeholder="Unit" value={newItemUnit}
-              onChange={(e) => setNewItemUnit(e.target.value)}
-              className="w-20 px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
-            />
-            <input
-              type="number" min="0" placeholder="Est. KSh" value={newItemPrice}
-              onChange={(e) => setNewItemPrice(e.target.value)}
-              className="w-24 px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
-            />
-            <button type="submit" className="px-4 py-2 rounded-xl bg-[#14532D] text-white text-xs font-bold cursor-pointer">
-              Add
-            </button>
+          <form onSubmit={handleAddItem} className="mt-4 pt-4 border-t border-[#F1EFE8] space-y-2">
+            <div className="flex flex-wrap items-end gap-2">
+              <input
+                type="text" placeholder="Item name (e.g. Dish soap, Toilet paper, Tomatoes)" value={newItemName}
+                onChange={(e) => setNewItemName(e.target.value)} required
+                className="flex-1 min-w-[200px] px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
+              />
+              <select
+                value={newItemCategory}
+                onChange={(e) => setNewItemCategory(e.target.value as '' | ShoppingCategory)}
+                className="px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
+              >
+                <option value="">Food</option>
+                {NON_FOOD_CATEGORIES.map((c) => (
+                  <option key={c.key} value={c.key}>{c.label}</option>
+                ))}
+              </select>
+              <input
+                type="number" min="0.1" step="0.1" placeholder="Qty" value={newItemQty}
+                onChange={(e) => setNewItemQty(e.target.value)}
+                className="w-20 px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
+              />
+              <input
+                type="text" placeholder="Unit" value={newItemUnit}
+                onChange={(e) => setNewItemUnit(e.target.value)}
+                className="w-20 px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
+              />
+              <input
+                type="number" min="0" placeholder="Est. KSh" value={newItemPrice}
+                onChange={(e) => setNewItemPrice(e.target.value)}
+                className="w-24 px-3 py-2 bg-[#FAF8F2] border border-[#E8E5DD] rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#14532D]"
+              />
+              <button type="submit" className="px-4 py-2 rounded-xl bg-[#14532D] text-white text-xs font-bold cursor-pointer">
+                Add
+              </button>
+            </div>
+            {duplicateWarning && (
+              <p className="flex items-center gap-1.5 text-[11px] font-semibold text-[#B45309]">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                {duplicateWarning.name} — Already added · {duplicateWarning.quantity} {duplicateWarning.unit}
+              </p>
+            )}
           </form>
         )}
       </div>
@@ -277,7 +326,7 @@ export const ShoppingView: React.FC = () => {
 
       {/* Categorized Grocery List */}
       <div className="space-y-6">
-        {categoriesOrder.map(({ key, label }) => {
+        {allCategoriesOrder.map(({ key, label }) => {
           const categoryItems = filteredItems.filter((i) => i.category === key);
           if (categoryItems.length === 0) return null;
 

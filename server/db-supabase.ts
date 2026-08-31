@@ -999,6 +999,8 @@ export class SupabaseDatabaseAdapter implements IDatabaseAdapter {
           quantity: item.quantity, unit: item.unit, estimated_price_ksh: item.estimatedPriceKsh,
           actual_price_ksh: item.actualPriceKsh ?? null, is_purchased: item.isPurchased, sort_order: i,
           frequency: item.frequency || 'weekly', source: item.source || 'generated',
+          canonical_key: item.canonicalKey ?? null, variant: item.variant ?? null,
+          is_compound: item.isCompound ?? false,
         }))
       );
     }
@@ -1286,6 +1288,9 @@ function mapShoppingList(row: Record<string, unknown>): ShoppingListRecord {
       isPurchased: Boolean(i.is_purchased),
       frequency: ((i.frequency as 'weekly' | 'monthly') ?? 'weekly'),
       source: ((i.source as 'generated' | 'manual') ?? 'generated'),
+      canonicalKey: (i.canonical_key as string) ?? null,
+      variant: (i.variant as string) ?? null,
+      isCompound: Boolean(i.is_compound),
     }));
   return {
     id: row.id as string,

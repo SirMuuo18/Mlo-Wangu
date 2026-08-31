@@ -17,6 +17,7 @@ import {
   OverspendingAnalysis,
 } from '../src/types.js';
 import { KENYAN_FOOD_ITEMS, KENYAN_MEALS, SAMPLE_HOUSEHOLD_MEMBERS } from '../src/data/kenyanFoodData.js';
+import { mergeShoppingItems, inferShoppingCategory, MergeableItem } from './shoppingCanonicalization.js';
 
 // Vercel's function filesystem is read-only except /tmp — persisting there
 // still doesn't survive across cold starts/invocations, but avoids a hard
@@ -227,58 +228,42 @@ const FREQUENCY_BY_CATEGORY: Record<string, 'weekly' | 'monthly'> = {
 };
 
 export function generateShoppingItemsFromMealPlan(mealPlan: WeeklyMealPlan): ShoppingList['items'] {
-  const itemMap: Record<string, { category: any; quantity: number; unit: string; estimatedPriceKsh: number }> = {};
+  const raw: MergeableItem[] = [];
 
   Object.values(mealPlan.days).forEach((dayPlan) => {
     const mealsToProcess = [dayPlan.breakfast, dayPlan.lunch, dayPlan.dinner, dayPlan.snack].filter(Boolean) as Meal[];
     mealsToProcess.forEach((meal) => {
       meal.ingredients.forEach((ing) => {
-        const key = ing.name.toLowerCase().trim();
-        if (itemMap[key]) {
-          itemMap[key].quantity += ing.quantity;
-          itemMap[key].estimatedPriceKsh += ing.estimatedCostKsh;
-        } else {
-          // Categorize ingredient
-          let category: any = 'vegetables';
-          const lower = key.toLowerCase();
-          if (lower.includes('flour') || lower.includes('rice') || lower.includes('potato') || lower.includes('matoke') || lower.includes('githeri') || lower.includes('oats') || lower.includes('bread') || lower.includes('nduma')) {
-            category = 'carbohydrates';
-          } else if (lower.includes('bean') || lower.includes('beef') || lower.includes('chicken') || lower.includes('egg') || lower.includes('omena') || lower.includes('tilapia') || lower.includes('ndengu') || lower.includes('kamande') || lower.includes('fish') || lower.includes('meat')) {
-            category = 'proteins';
-          } else if (lower.includes('banana') || lower.includes('mango') || lower.includes('avocado') || lower.includes('watermelon') || lower.includes('pawpaw') || lower.includes('pineapple') || lower.includes('orange')) {
-            category = 'fruits';
-          } else if (lower.includes('milk') || lower.includes('mala') || lower.includes('yoghurt')) {
-            category = 'dairy';
-          } else if (lower.includes('oil') || lower.includes('salt') || lower.includes('royco') || lower.includes('spice') || lower.includes('curry') || lower.includes('tea')) {
-            category = 'spices_pantry';
-          }
-
-          itemMap[key] = {
-            category,
-            quantity: ing.quantity,
-            unit: ing.unit,
-            estimatedPriceKsh: ing.estimatedCostKsh,
-          };
-        }
+        raw.push({
+          name: ing.name,
+          category: inferShoppingCategory(ing.name),
+          quantity: ing.quantity,
+          unit: ing.unit,
+          estimatedPriceKsh: ing.estimatedCostKsh,
+          isPurchased: false,
+          source: 'generated',
+        });
       });
     });
   });
 
-  return Object.entries(itemMap).map(([name, data], idx) => ({
-    id: `shop_item_${idx}_${Date.now()}`,
-    name: capitalize(name),
-    category: data.category,
-    quantity: Math.round(data.quantity * 10) / 10,
-    unit: data.unit,
-    estimatedPriceKsh: Math.round(data.estimatedPriceKsh),
-    isPurchased: false,
-    frequency: FREQUENCY_BY_CATEGORY[data.category] || 'weekly',
-    source: 'generated',
-  }));
-}
+  const merged = mergeShoppingItems(raw);
 
-function capitalize(s: string) {
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  return merged.map((item, idx) => ({
+    id: `shop_item_${idx}_${Date.now()}`,
+    name: item.name,
+    category: item.category as ShoppingList['items'][number]['category'],
+    quantity: Math.round(item.quantity * 10) / 10,
+    unit: item.unit,
+    estimatedPriceKsh: Math.round(item.estimatedPriceKsh),
+    isPurchased: false,
+    frequency: FREQUENCY_BY_CATEGORY[item.category] || 'weekly',
+    source: 'generated',
+    canonicalKey: item.canonicalKey,
+    variant: item.variant,
+    isCompound: item.isCompound,
+    quantityNote: item.quantityNote,
+  }));
 }
 
 export function getMondayOfCurrentWeek(): string {

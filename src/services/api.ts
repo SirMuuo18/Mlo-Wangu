@@ -171,6 +171,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ shoppingList }),
     }),
+  checkShoppingDuplicate: (name: string) =>
+    request<{ duplicate: boolean; canonicalName?: string; existingItem?: { name: string; quantity: number; unit: string } }>(
+      `/api/shopping/check-duplicate?name=${encodeURIComponent(name)}`
+    ),
 
   // Water & Hydration
   getWaterData: () => request<{ waterLog: WaterLog; config: WaterTargetConfig; history: WaterLog[] }>('/api/water/today'),

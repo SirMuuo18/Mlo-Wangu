@@ -18,6 +18,7 @@ import { SupabaseDatabaseAdapter } from './db-supabase.js';
 import type { UserProfile, Household, HouseholdMember, WaterTargetConfig, WaterLog, UserBudget, Expense, NotificationItem, Meal, WeeklyMealPlan, ShoppingList, DayOfWeek } from '../src/types.js';
 import type { PaymentStatus, PaymentPlanType, MealRecord, NotificationRecord } from './db-adapter.js';
 import { MEAL_PLAN_GENERATION_ENTITLEMENT_VALID_MS } from './mpesa.js';
+import { mergeShoppingItems, MergeableItem } from './shoppingCanonicalization.js';
 
 function useJson(): boolean {
   return process.env.USE_JSON_DB === 'true';
@@ -580,6 +581,12 @@ export const contentDb = {
     const shoppingItems = generateShoppingItemsFromMealPlan(plan);
     const previousList = await contentDb.getShoppingList(plan.userId, plan.weekStartDate);
     const manualItems = (previousList?.items ?? []).filter((i) => i.source === 'manual');
+    // contentDb.saveShoppingList runs everything through mergeShoppingItems
+    // before persisting, so a manual item that names the same ingredient as
+    // a freshly-generated one (e.g. user added "Pishori Rice" by hand, the
+    // new plan also calls for "White Rice") merges into one row instead of
+    // duplicating — the concat here is just "everything that should be
+    // considered," not the final dedup pass.
     await contentDb.saveShoppingList({
       id: `sl_${plan.id}`, userId: plan.userId, weekStartDate: plan.weekStartDate,
       items: [...shoppingItems, ...manualItems], updatedAt: new Date().toISOString(),
@@ -639,18 +646,41 @@ export const contentDb = {
         id: i.id, name: i.name, category: i.category as ShoppingList['items'][0]['category'],
         quantity: i.quantity, unit: i.unit, estimatedPriceKsh: i.estimatedPriceKsh,
         isPurchased: i.isPurchased, frequency: i.frequency, source: i.source,
+        canonicalKey: i.canonicalKey ?? undefined, variant: i.variant ?? undefined,
+        isCompound: i.isCompound ?? undefined,
       })),
     };
   },
 
+  // Every write funnels through here — the manual PUT route (server.ts) and
+  // saveMealPlan's regenerate-and-persist step above both call this, so this
+  // is the single chokepoint where mergeShoppingItems runs. Nothing should
+  // ever bypass it to write shopping_list_items directly.
   async saveShoppingList(list: ShoppingList): Promise<ShoppingList> {
-    if (useJson()) return db.saveShoppingList(list);
+    const merged: MergeableItem[] = mergeShoppingItems(list.items.map((i) => ({
+      id: i.id, name: i.name, category: i.category, quantity: i.quantity, unit: i.unit,
+      estimatedPriceKsh: i.estimatedPriceKsh, actualPriceKsh: i.actualPriceKsh ?? null,
+      isPurchased: i.isPurchased, frequency: i.frequency ?? 'weekly', source: i.source ?? 'generated',
+    })));
+    const mergedList: ShoppingList = { ...list, items: merged.map((i) => ({
+      id: i.id || `shop_item_${Math.random().toString(36).slice(2)}`,
+      name: i.name, category: i.category as ShoppingList['items'][0]['category'],
+      quantity: i.quantity, unit: i.unit, estimatedPriceKsh: i.estimatedPriceKsh,
+      actualPriceKsh: i.actualPriceKsh ?? undefined, isPurchased: i.isPurchased,
+      frequency: i.frequency, source: i.source, canonicalKey: i.canonicalKey,
+      variant: i.variant, isCompound: i.isCompound, quantityNote: i.quantityNote,
+    })) };
+
+    if (useJson()) return db.saveShoppingList(mergedList);
+
     const saved = await sb().saveShoppingList({
-      id: list.id, userId: list.userId, weekStartDate: list.weekStartDate,
-      items: list.items.map((i) => ({
+      id: mergedList.id, userId: mergedList.userId, weekStartDate: mergedList.weekStartDate,
+      items: mergedList.items.map((i) => ({
         id: i.id, name: i.name, category: i.category, quantity: i.quantity, unit: i.unit,
-        estimatedPriceKsh: i.estimatedPriceKsh, isPurchased: i.isPurchased,
-        frequency: i.frequency ?? 'weekly', source: i.source ?? 'generated',
+        estimatedPriceKsh: i.estimatedPriceKsh, actualPriceKsh: i.actualPriceKsh ?? null,
+        isPurchased: i.isPurchased, frequency: i.frequency ?? 'weekly', source: i.source ?? 'generated',
+        canonicalKey: i.canonicalKey ?? null, unitGroup: undefined, variant: i.variant ?? null,
+        isCompound: i.isCompound ?? false,
       })),
     });
     return {
@@ -659,6 +689,8 @@ export const contentDb = {
         id: i.id, name: i.name, category: i.category as ShoppingList['items'][0]['category'],
         quantity: i.quantity, unit: i.unit, estimatedPriceKsh: i.estimatedPriceKsh,
         isPurchased: i.isPurchased, frequency: i.frequency, source: i.source,
+        canonicalKey: i.canonicalKey ?? undefined, variant: i.variant ?? undefined,
+        isCompound: i.isCompound ?? undefined,
       })),
     };
   },

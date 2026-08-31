@@ -272,9 +272,17 @@ CREATE TABLE IF NOT EXISTS shopping_list_items (
   -- 'manual' items are user-added and preserved across meal-plan
   -- regeneration; 'generated' items come from the meal plan and are
   -- replaced on every regeneration. See migrations/0014_shopping_item_source.sql.
-  source             TEXT NOT NULL DEFAULT 'generated' CHECK (source IN ('generated', 'manual'))
+  source             TEXT NOT NULL DEFAULT 'generated' CHECK (source IN ('generated', 'manual')),
+  -- Canonicalization/dedup metadata computed by
+  -- server/shoppingCanonicalization.ts. See migrations/0020_shopping_item_canonicalization.sql.
+  canonical_key      TEXT,
+  unit_group         TEXT,
+  variant            TEXT,
+  is_compound        BOOLEAN NOT NULL DEFAULT false
 );
 CREATE INDEX IF NOT EXISTS idx_items_list ON shopping_list_items(shopping_list_id);
+CREATE INDEX IF NOT EXISTS idx_shopping_items_canonical ON shopping_list_items(shopping_list_id, canonical_key, unit_group);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_shopping_items_canonical ON shopping_list_items(shopping_list_id, canonical_key, unit_group) WHERE canonical_key IS NOT NULL;
 
 -- ─── Water / Hydration ────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS water_configs (

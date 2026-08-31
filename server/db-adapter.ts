@@ -238,6 +238,10 @@ export interface ShoppingListItemRecord {
   isPurchased: boolean;
   frequency: 'weekly' | 'monthly';
   source: 'generated' | 'manual';
+  canonicalKey?: string | null;
+  unitGroup?: string | null;
+  variant?: string | null;
+  isCompound?: boolean;
 }
 
 export interface ShoppingListRecord {
