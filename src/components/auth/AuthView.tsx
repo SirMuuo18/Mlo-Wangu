@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { Mail, Lock, User, Eye, EyeOff, AlertCircle, CheckCircle2, ArrowLeft } from 'lucide-react';
 import { SUPPORT_EMAIL, SUPPORT_MAILTO } from '../../data/supportContent';
+import { AndroidDownloadSection } from '../AndroidDownloadSection';
 
 type AuthMode = 'login' | 'register' | 'forgot' | 'reset';
 
@@ -281,6 +282,8 @@ export const AuthView: React.FC = () => {
           </a>
         </p>
       </div>
+
+      <AndroidDownloadSection />
     </div>
   );
 };
