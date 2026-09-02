@@ -1,6 +1,6 @@
 import React from 'react';
 import { Smartphone, Download } from 'lucide-react';
-import { APK_DOWNLOAD_URL, EAS_BUILD_ID, RUNTIME_VERSION } from '../data/androidDownload';
+import { APK_DOWNLOAD_URL } from '../data/androidDownload';
 
 // Manual click only: a plain anchor with `download`. No effect, redirect, or
 // platform/auth check ever fires this — the browser only navigates/downloads
@@ -29,9 +29,6 @@ export const AndroidDownloadSection: React.FC = () => {
       </a>
 
       <p className="text-center text-[11px] text-blue-300/60 mt-3">
-        Android Preview · Build {EAS_BUILD_ID.slice(0, 8)} · Runtime {RUNTIME_VERSION.slice(0, 8)}
-      </p>
-      <p className="text-center text-[10px] text-blue-300/40 mt-1">
         Preview build — not yet on Google Play.
       </p>
     </div>
